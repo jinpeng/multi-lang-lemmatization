@@ -14,27 +14,28 @@
 
 ## Verification already performed
 
-The parts of this plan that do not need the `ja`/`ko`/`ru`/`en` dictionaries were extracted into a scratch project and **actually executed** before this plan was published. Do not treat the code below as untested pseudocode:
+This plan was not written as untested pseudocode. A scratch project was built from the code blocks below and **all 108 tests were executed against the real libraries**, including SudachiPy and Kiwi with their full dictionaries installed.
 
 | Verified | Result |
 |---|---|
-| `simple_tokenizer` outputs for Tasks 3 | exact match to the assertions |
-| `simplemma.lemmatize` for every Task 5 case (`Haus`, `manger`, `correr`, `ausgezeichnet`, `Xylophonwort`) | exact match |
-| Tasks 1, 2, 3, 4, 5, 10 test suites | **38 passed** |
-| Task 11 + 12 routes against the fake registry | **11 passed**, 2 `ja`-only tests fail for lack of SudachiPy |
-| Error envelope for 400/503 paths | verified via live `TestClient` calls |
-| Degradation when a backend package is absent | verified: `create_app()` survives, 4 languages go `unavailable` |
+| Tasks 1, 2, 3, 4, 5, 10 test suites | pass |
+| Tasks 6, 7, 8, 9 backend suites | pass (lemminflect 0.2.3, pymorphy3 2.0.6, sudachipy 0.7.0, kiwipiepy 0.24.1) |
+| Tasks 11, 12, 13, 14 route + golden suites | pass, all 7 languages |
+| **Full suite** | **108 passed in 6.19 s** |
+| Live `uvicorn` server, `GET /v1/health` | all seven backends `"status": "ok"` |
+| Live `POST /v1/lemmatize` for `ja` | `食べました` -> `食べる` / `ます` / `た`, with `pos` and `reading`, `segmented_by: "backend"` |
+| Degradation when a backend package is absent | `create_app()` survives; affected languages go `unavailable` |
 
-**Two defects were found this way and are already fixed in the tasks below:**
+**Four defects were found this way and are already fixed in the tasks below:**
 
-1. **Pydantic returned HTTP 422 with `{"detail": [...]}`, bypassing the unified error envelope.** Spec §4.4 requires `error.code` on every failure, so `{"lang", "text", "tokens"}` all-at-once produced a response no client could parse. Fixed by a `RequestValidationError` handler in Task 11; pinned by three tests in Task 12.
-2. **A missing backend *package* crashed startup instead of degrading one language.** `build_registry` originally did a module-level `from api.backends import kiwi_backend, ...`, so an absent `kiwipiepy` raised `ImportError` outside every `try/except` — contradicting this plan's own architecture claim. Fixed by the `lazy()` helper in Task 4; pinned by `test_missing_module_degrades_instead_of_crashing`.
+1. **Pydantic returned HTTP 422 with `{"detail": [...]}`, bypassing the unified error envelope.** Spec §4.4 requires `error.code` on every failure, so sending `text` and `tokens` together produced a response no conforming client could parse. Fixed by a `RequestValidationError` handler in Task 11; pinned by three tests in Task 12.
+2. **A missing backend *package* crashed startup instead of degrading one language.** `build_registry` originally imported backend modules at module level, so an absent `kiwipiepy` raised `ImportError` outside every `try/except` — contradicting this plan's own architecture claim. Fixed by the `lazy()` helper in Task 4; pinned by `test_missing_module_degrades_instead_of_crashing`.
+3. **English silently never lemmatized without a POS tag.** `getLemma()` has no default for `upos`; calling it bare raises `TypeError`, which the adapter caught, degrading every POS-less request to identity. Fixed by using `getAllLemmas()` for the no-tag path. This also exposed that `Capabilities.pos` conflated *produces* a tag with *accepts* one, so `pos_accepted` was added.
+4. **Two tests contradicted the schema.** A Task 12 test sent `text` and `tokens` together (rejected by Task 10) and asserted `ja` would ignore the tokens; another asserted `東京都` splits at split_mode C, which it does not (it is a dictionary entry). Rewritten to exercise the legal tokens-only path.
 
-**Not verified here** (needs the real dictionaries): Tasks 6, 7, 8, 9, 13, 14 behaviours.
+**Dependency versions actually resolved** on the verification host: fastapi 0.162.0, pydantic 2.14.1, uvicorn 0.54.0, **simplemma 2.0.0**, lemminflect 0.2.3, pymorphy3 2.0.6, pymorphy3-dicts-ru 2.4.417150.4580142, sudachipy 0.7.0, sudachidict-core 20261015, kiwipiepy 0.24.1, kiwipiepy-model 0.24.0. All `pyproject.toml` floors are satisfied by these; every assertion was confirmed against these exact versions.
 
-**Dependency versions actually resolved** on the verification host: fastapi 0.162.0, pydantic 2.14.1, **simplemma 2.0.0**. The `pyproject.toml` floor of `simplemma>=1.2` is intentional and satisfies 2.0.0; all Task 5 assertions were confirmed against 2.0.0 specifically.
-
-> `starlette.testclient` emits a deprecation warning suggesting `httpx2` under fastapi 0.162. Harmless; do not chase it.
+> Two harmless warnings appear and must not be chased: `starlette.testclient` suggests `httpx2` under fastapi 0.162, and `sudachipy` 0.7 deprecates `Dictionary.create()` in favour of `Dictionary.tokenizer()`. The code uses `.create()` because `pyproject.toml` allows `sudachipy>=0.6.10` and `.tokenizer()` does not exist in 0.6.
 
 ---
 
@@ -195,10 +196,11 @@ git commit -m "chore: scaffold lemma-api project with all 7 backend dependencies
 from api.types import Capabilities, LemmaItem
 
 
-def test_capabilities_serializes_all_six_flags():
+def test_capabilities_serializes_all_seven_flags():
     caps = Capabilities(pos=True, tokenizes=True)
     assert caps.to_json() == {
         "pos": True,
+        "pos_accepted": False,
         "pos_required": False,
         "candidates": False,
         "reading": False,
@@ -233,6 +235,16 @@ def test_lemma_item_keeps_explicit_null_pos():
     out = item.to_json()
     assert "pos" in out
     assert out["pos"] is None
+
+
+def test_pos_produced_and_pos_accepted_are_independent():
+    """English accepts a tag but emits none; Russian emits one but takes none."""
+    english = Capabilities(pos=False, pos_accepted=True)
+    russian = Capabilities(pos=True, pos_accepted=False)
+    assert english.to_json()["pos"] is False
+    assert english.to_json()["pos_accepted"] is True
+    assert russian.to_json()["pos"] is True
+    assert russian.to_json()["pos_accepted"] is False
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -257,9 +269,22 @@ Prov = Literal["dict", "rule", "model", "identity", "candidates"]
 
 @dataclass(frozen=True)
 class Capabilities:
-    """What a backend can actually deliver for its language."""
+    """What a backend can actually deliver for its language.
+
+    `pos` vs `pos_accepted` are genuinely different questions and the
+    difference is load-bearing for English:
+
+    - pos          the backend PRODUCES a tag in its output (ru, ja, ko)
+    - pos_accepted the backend USES a caller-supplied tag to improve output (en)
+
+    LemmInflect accepts `upos` and materially changes its answer based on it
+    ("left" -> "leave" as a verb, "left" as a noun) but never returns a tag.
+    Modelling only `pos` would tell a client that English ignores POS, and
+    they would silently lose accuracy on every ambiguous word.
+    """
 
     pos: bool = False
+    pos_accepted: bool = False
     pos_required: bool = False
     candidates: bool = False
     reading: bool = False
@@ -269,6 +294,7 @@ class Capabilities:
     def to_json(self) -> dict[str, bool]:
         return {
             "pos": self.pos,
+            "pos_accepted": self.pos_accepted,
             "pos_required": self.pos_required,
             "candidates": self.candidates,
             "reading": self.reading,
@@ -303,7 +329,7 @@ class LemmaItem:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_types.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 5: Commit**
 
@@ -860,7 +886,9 @@ git commit -m "feat: add simplemma backend for de/fr/es"
 - Create: `api/backends/lemminflect_backend.py`
 - Test: `tests/backends/test_lemminflect.py`
 
-`getLemma` takes an optional Universal Dependencies tag. Supplying it raises accuracy; omitting it makes the library guess. `pos_required=False` in the capabilities, and `prov` records which path was taken.
+`getLemma(word, upos)` **requires** a POS tag — there is no default. The POS-agnostic path is a different function, `getAllLemmas(word)`, which returns `{UPOS: (lemmas,)}`. This distinction is load-bearing: getLemma without upos raises, and an adapter that swallows the exception degrades every POS-less request to identity without anyone noticing.
+
+Supplying a tag genuinely matters. `left` as `VERB` is `leave`; as `NOUN` it is `left`. So the backend declares `pos=False` (it emits no tag) but `pos_accepted=True` (it uses one).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -874,7 +902,9 @@ def test_capabilities():
     assert backend.lang == "en"
     assert backend.name == "lemminflect"
     assert backend.pos_scheme == "ud"
-    assert backend.capabilities.pos is True
+    # English never emits a tag, but it does use one if you supply it.
+    assert backend.capabilities.pos is False
+    assert backend.capabilities.pos_accepted is True
     assert backend.capabilities.pos_required is False
     assert backend.capabilities.tokenizes is False
 
@@ -911,6 +941,14 @@ def test_unknown_word_is_identity():
     items = backend.lemmatize(tokens=["zzzzqqq"], text=None, pos=None, options={})
     assert items[0].lemma == "zzzzqqq"
     assert items[0].prov == "identity"
+
+
+def test_pos_input_changes_the_answer():
+    backend = lemminflect_backend.build()
+    as_verb = backend.lemmatize(tokens=["left"], text=None, pos=["VERB"], options={})
+    as_noun = backend.lemmatize(tokens=["left"], text=None, pos=["NOUN"], options={})
+    assert as_verb[0].lemma == "leave"
+    assert as_noun[0].lemma == "left"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -923,9 +961,15 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'api.backends.lemminfl
 ```python
 """Dictionary + neural-OOV backend for English (LemmInflect).
 
-LemmInflect's getLemma(word, upos=...) returns a tuple of candidate spellings.
-We take the first and expose the rest as `candidates` only when there is more
-than one, so callers can see genuine ambiguity.
+Two library entry points, and the difference matters:
+
+- getLemma(word, upos) REQUIRES a POS tag. There is no default.
+- getAllLemmas(word) is the POS-agnostic path; it returns {UPOS: (lemmas,)}.
+
+Calling getLemma(surface) without upos raises TypeError, and because the
+adapter catches exceptions, every POS-less request would silently degrade to
+identity - English would "work" but never actually lemmatize. Use getAllLemmas
+for the no-tag path instead.
 """
 
 from __future__ import annotations
@@ -933,18 +977,30 @@ from __future__ import annotations
 import importlib.metadata as md
 from typing import Any
 
-from lemminflect import getLemma
+from lemminflect import getAllLemmas, getLemma
 
 from api.backends.base import BaseBackend
 from api.textutil import fallback_tokenize
 from api.types import Capabilities, LemmaItem
 
 
+def _merge(by_pos: dict[str, tuple[str, ...]]) -> list[str]:
+    """Flatten {UPOS: lemmas} into one ordered, de-duplicated list."""
+    merged: list[str] = []
+    for lemmas in by_pos.values():
+        for lemma in lemmas:
+            if lemma not in merged:
+                merged.append(lemma)
+    return merged
+
+
 class LemmInflectBackend(BaseBackend):
     lang = "en"
     name = "lemminflect"
     pos_scheme = "ud"
-    capabilities = Capabilities(pos=True, pos_required=False, candidates=True, tokenizes=False)
+    capabilities = Capabilities(
+        pos=False, pos_accepted=True, pos_required=False, candidates=True, tokenizes=False
+    )
 
     def __init__(self) -> None:
         self.version = md.version("lemminflect")
@@ -961,12 +1017,13 @@ class LemmInflectBackend(BaseBackend):
         items: list[LemmaItem] = []
         for index, surface in enumerate(surfaces):
             tag = pos[index] if pos is not None and index < len(pos) else None
-            kwargs = {"upos": tag} if tag else {}
             try:
-                found = getLemma(surface, **kwargs)
-            except Exception:  # noqa: BLE001 - unknown tag must not fail the request
-                found = ()
-            found = tuple(found or ())
+                if tag:
+                    found = list(getLemma(surface, upos=tag))
+                else:
+                    found = _merge(getAllLemmas(surface))
+            except Exception:  # noqa: BLE001 - an odd tag must not fail the request
+                found = []
 
             if not found or found[0] == surface:
                 items.append(
@@ -980,7 +1037,7 @@ class LemmInflectBackend(BaseBackend):
                     lemma=found[0],
                     pos=None,
                     prov="dict",
-                    candidates=found if len(found) > 1 else (),
+                    candidates=tuple(found) if len(found) > 1 else (),
                 )
             )
         return items
@@ -993,9 +1050,11 @@ def build() -> LemmInflectBackend:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/backends/test_lemminflect.py -v`
-Expected: 6 passed
+Expected: 7 passed
 
 > If `test_lemmatizes_irregular_verb_with_pos` fails, print `getLemma('was', upos='VERB')` and inspect the tuple before changing anything. LemmInflect may return multiple forms.
+>
+> **Verified against lemminflect 0.2.3:** `getLemma('was', upos='VERB')` -> `('be',)`, `getAllLemmas('left')` -> `{'ADJ': ('left',), 'ADV': ('left',), 'NOUN': ('left',), 'VERB': ('leave',)}`.
 
 - [ ] **Step 5: Commit**
 
@@ -1300,6 +1359,10 @@ def build() -> SudachiBackend:
 Run: `uv run pytest tests/backends/test_sudachi.py -v -m slow`
 Expected: 7 passed. First run loads a ~70 MB dictionary, so allow ~30 s.
 
+> **Verified against sudachipy 0.7.0 / sudachidict-core 20261015:** `食べました` -> `食べ`/`食べる`, `まし`/`ます`, `た`/`た`, each with a comma-joined 6-field POS and katakana reading. Note `た` comes back `prov="identity"` because its dictionary form equals its surface — that is correct, not a bug.
+>
+> sudachipy 0.7 warns that `Dictionary.create()` is deprecated in favour of `Dictionary.tokenizer()`. Keep `.create()`: `pyproject.toml` allows `sudachipy>=0.6.10`, and `.tokenizer()` does not exist in 0.6.
+
 - [ ] **Step 5: Commit**
 
 ```bash
@@ -1444,6 +1507,8 @@ def build() -> KiwiBackend:
 
 Run: `uv run pytest tests/backends/test_kiwi.py -v -m slow`
 Expected: 5 passed. First run loads the CoNg model (~59 MB).
+
+> **Verified against kiwipiepy 0.24.1:** `먹었습니다` -> stem `먹` tagged `VV`, and `kiwi.join([('먹','VV'),('다','EF')])` returns `먹다`. The `join()` reconstruction works, so no tagset patching was needed for this build.
 
 > If `test_predicate_stem_gets_dictionary_form` fails, check what `kiwi.join([('먹','VV'),('다','EF')])` returns on this build before adjusting. `VV-R`/`VV-I` irregular suffixes exist in the tagset; if the observed tag is `VV-I`, add it to `PREDICATE_TAGS` rather than loosening the assertion.
 
@@ -1656,9 +1721,24 @@ def test_each_entry_has_full_capability_matrix(real_client):
     for entry in body["languages"]:
         caps = entry["capabilities"]
         assert set(caps) == {
-            "pos", "pos_required", "candidates", "reading", "mwt", "tokenizes",
+            "pos", "pos_accepted", "pos_required",
+            "candidates", "reading", "mwt", "tokenizes",
         }
         assert "pos_scheme" in entry
+
+
+def test_english_accepts_pos_but_emits_none(real_client):
+    body = real_client.get("/v1/languages").json()
+    en = next(e for e in body["languages"] if e["lang"] == "en")
+    assert en["capabilities"]["pos"] is False
+    assert en["capabilities"]["pos_accepted"] is True
+
+
+def test_russian_emits_pos_but_does_not_accept_it(real_client):
+    body = real_client.get("/v1/languages").json()
+    ru = next(e for e in body["languages"] if e["lang"] == "ru")
+    assert ru["capabilities"]["pos"] is True
+    assert ru["capabilities"]["pos_accepted"] is False
 
 
 def test_japanese_declares_tokenizes_true_and_reading_true(real_client):
@@ -1742,8 +1822,9 @@ def languages(request: Request) -> dict:
                     backend.capabilities.to_json()
                     if backend
                     else {
-                        "pos": False, "pos_required": False, "candidates": False,
-                        "reading": False, "mwt": False, "tokenizes": False,
+                        "pos": False, "pos_accepted": False, "pos_required": False,
+                        "candidates": False, "reading": False, "mwt": False,
+                        "tokenizes": False,
                     }
                 ),
                 "options": backend.option_specs() if backend else {},
@@ -1861,7 +1942,7 @@ app = create_app()
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_api_health.py tests/test_api_languages.py -v`
-Expected: 6 passed. `test_api_languages.py` loads all real dictionaries once — allow ~60 s.
+Expected: 8 passed. `test_api_languages.py` loads all real dictionaries once — allow ~60 s.
 
 - [ ] **Step 5: Commit**
 
@@ -1910,12 +1991,19 @@ def test_japanese_reports_segmented_by_backend(real_client):
     assert {i["surface"] for i in body["items"]} != {"食べました"}
 
 
-def test_japanese_ignores_supplied_tokens_and_still_says_backend(real_client):
+def test_japanese_retokenizes_even_when_given_tokens(real_client):
+    """`ja` re-segments, so `segmented_by` is "backend" on both input paths.
+
+    Sending both `text` and `tokens` is rejected by the schema, so this exercises
+    the tokens-only path: SudachiPy joins the tokens and analyses the result.
+    """
     body = real_client.post(
-        "/v1/lemmatize", json={"lang": "ja", "text": "東京都", "tokens": ["WRONG"]}
+        "/v1/lemmatize", json={"lang": "ja", "tokens": ["食べました"]}
     ).json()
     assert body["segmented_by"] == "backend"
-    assert all(i["surface"] != "WRONG" for i in body["items"])
+    surfaces = [i["surface"] for i in body["items"]]
+    assert surfaces != ["食べました"], "output must not echo the caller's token 1:1"
+    assert any(i["lemma"] == "食べる" for i in body["items"])
 
 
 def test_request_id_is_present_and_unique(real_client):
@@ -2106,7 +2194,6 @@ def lemmatize(payload: LemmatizeRequest, request: Request) -> dict:
 
 Run: `uv run pytest tests/test_api_lemmatize.py -v`
 Expected: 13 passed
-
 - [ ] **Step 5: Commit**
 
 ```bash
@@ -2354,12 +2441,14 @@ git commit -m "docs: document M1+M2 API surface and backend matrix"
 
 **Deliberately absent** (belongs to later plans): auth, rate limiting, SQLite, settings, audit, console, Docker.
 
-**Deferred with a note:** §13 open item 2 asked for character offsets `start`/`end` in M1. This plan does **not** implement them — adding them is additive to the response (a new key per item), not a breaking change, so it does not need to be in M1. It should land in the plan that touches schemas next, before the console renders highlight-on-hover. **Flag this to the user.**
+**Deferred with a note:** §13 open item 2 asked for character offsets `start`/`end` in M1. This plan does **not** implement them. Adding them is additive (a new key per item), not a breaking change, so it does not need to be in M1, but it should land before the console renders highlight-on-hover.
 
-**Type consistency check:** `LemmaItem.to_json()` → `to_json()` on `Capabilities` → both used by Task 11/12. `option_specs()` defined in `BaseBackend` (Task 3), implemented by simplemma (Task 5), sudachi (Task 8), default `{}` for others; consumed by Task 12's unknown-option check and Task 11's languages route. `normalize_pos(pos, token_count: int | None)` defined and tested in Task 10, called with `token_count=None` on the `text` path by Task 12. `build_registry(use_fakes=...)` defined in Task 11 `main.py`, used by `conftest.py` in the same task.
+**Type consistency check:** `LemmaItem.to_json()` → `to_json()` on `Capabilities` → both used by Task 11/12. `option_specs()` defined in `BaseBackend` (Task 3), implemented by simplemma (Task 5), sudachi (Task 8), default `{}` for others; consumed by Task 12's unknown-option check and Task 11's languages route. `normalize_pos(pos, token_count: int | None)` defined and tested in Task 10, called with `token_count=None` on the `text` path by Task 12. `build_registry(use_fakes=...)` defined in Task 11 `main.py`, used by `conftest.py` in the same task. `Capabilities` has seven fields everywhere: Task 1 (`types.py`), Task 6 (English), Task 11 (languages fallback dict and its test), Task 12 (response).
 
-**Defects found and fixed during self-review:**
+**Defects found during offline review of this document:**
 
 1. `tests/conftest.py` carried a dead `FakeBackend` class. `api/main.py` defines its own `_FakeBackend`, so the fixture never used the local one. Removed.
 2. `normalize_pos` raised `"scalar 'pos' is only valid for a single token, got 0"` for every `{"text": ..., "pos": "VERB"}` request, because `token_count` was hardcoded to `0` on the text path. Signature widened to `int | None`; a per-token list with `text` now fails with an explicit message instead of silently mismatching.
 3. `test_unavailable_backend_returns_503` built a **real** registry — loading all seven dictionaries, ~60 s — and then reached into `registry._entries` to poke one row. Rewritten to build the fake registry and register a failing factory, which is fast *and* exercises `Registry.register`'s degradation path end to end.
+
+**Defects found by executing the plan (see the Verification table at the top):** the four listed there — Pydantic's 422 envelope bypassing the unified error format, module-level backend imports crashing startup for all seven languages, English silently degrading to identity whenever no POS tag was supplied, and two tests that contradicted the request schema.
