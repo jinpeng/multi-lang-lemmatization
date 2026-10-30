@@ -690,12 +690,22 @@ def test_all_is_sorted_by_language():
 def test_missing_module_degrades_instead_of_crashing():
     """A backend package absent from the image must not kill startup."""
     reg = Registry()
-    reg.register("xx", lazy("api.backends.simplemma_backend", "de"))
+    reg.register("xx", FakeBackend)
     reg.register("yy", lazy("api.backends.this_module_does_not_exist"))
 
     assert reg.get("xx").status == "ok"
     assert reg.get("yy").status == "unavailable"
     assert "ModuleNotFoundError" in reg.get("yy").reason
+
+
+def test_lazy_defers_construction_until_called():
+    """lazy() must not import at module scope, or the failure escapes the try."""
+    factory = lazy("api.backends.registry")
+    reg = Registry()
+    # registry has no build() -> degrades, proving the import happened inside
+    # the factory rather than at decoration time.
+    reg.register("zz", factory)
+    assert reg.get("zz").status == "unavailable"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -779,7 +789,7 @@ class Registry:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_registry.py -v`
-Expected: 6 passed
+Expected: 7 passed
 
 - [ ] **Step 5: Commit**
 
