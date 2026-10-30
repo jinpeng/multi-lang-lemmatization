@@ -40,7 +40,7 @@ The console's pure-logic modules (env validation, API client, curl builder, CSRF
 |---|---|---|
 | Plan 1 | M1+M2 — 7 backends, three `/v1/*` endpoints | verified, 108 tests |
 | Plan 2 | M3+M5 — Key/Secret, HMAC, SQLite, settings, audit | written, crypto verified by mutation |
-| **This plan** | M4+M6 — console, BFF, Playground, Docker, ops docs | being written now |
+| **This plan** | M4+M6 — console, BFF, Playground, Docker, ops docs | pure logic verified (21 tests); pages + E2E written |
 
 ---
 
@@ -66,6 +66,7 @@ Restating them because every task below is judged against this list:
 | `console/src/lib/api.ts` | typed fetch wrapper for the Python API |
 | `console/src/lib/session.ts` | admin cookie read/write/clear, CSRF token |
 | `console/src/lib/types.ts` | shared response types |
+| `console/src/lib/offsets.ts` | code-point → UTF-16 offset conversion |
 | `console/src/app/layout.tsx` | shell, nav |
 | `console/src/app/page.tsx` | Playground (Server Component + form) |
 | `console/src/app/actions/lemmatize.ts` | Server Action calling the API with the demo key |
@@ -517,10 +518,15 @@ export type LemmaItem = {
   prov: string;
   reading?: string;
   candidates?: string[];
+  /** Code-point offsets into the requested `text`. Absent for token input. */
+  start?: number;
+  end?: number;
 };
 
 export type LemmatizeResponse = {
   request_id: string;
+  /** Which unit start/end use; null when no offsets were produced. */
+  offset_unit: "unicode_code_point" | null;
   lang: string;
   backend: { name: string; version: string };
   segmented_by: "input" | "backend";
@@ -564,6 +570,20 @@ export type SettingRow = {
   overridden: boolean;
 };
 
+export type RequestRow = {
+  id: number;
+  at: string;
+  request_id: string;
+  key_id: string | null;
+  lang: string | null;
+  n_tokens: number | null;
+  bytes_in: number | null;
+  latency_ms: number;
+  status: number;
+  error_code: string | null;
+  ip: string | null;
+};
+
 export type AuditEntry = {
   id: number;
   at: string;
@@ -578,7 +598,8 @@ export type AuditEntry = {
 `console/src/lib/api.ts`:
 ```typescript
 import type {
-  AuditEntry, CreatedKey, KeyRecord, LanguageEntry, LemmatizeResponse, SettingRow,
+  AuditEntry, CreatedKey, KeyRecord, LanguageEntry, LemmatizeResponse,
+  RequestRow, SettingRow,
 } from "@/lib/types";
 
 export class ApiError extends Error {
@@ -709,6 +730,14 @@ export class ApiClient {
       { headers: this.adminHeaders(adminToken), cache: "no-store" },
     );
     return body.entries;
+  }
+
+  async readRequests(adminToken: string, limit = 100, offset = 0): Promise<RequestRow[]> {
+    const body = await this.request<{ requests: RequestRow[] }>(
+      `/admin/requests?limit=${limit}&offset=${offset}`,
+      { headers: this.adminHeaders(adminToken), cache: "no-store" },
+    );
+    return body.requests;
   }
 
   diagnostics(adminToken: string): Promise<Record<string, unknown>> {
@@ -1195,6 +1224,182 @@ Expected: 4 passed, build succeeds.
 ```bash
 git add console/src/app console/src/components console/src/lib/curl.ts console/tests/curl.test.ts
 git commit -m "feat: add Playground with server-side demo key and rendered curl"
+```
+
+---
+
+## Task 6b: Offset-aware highlighting
+
+**Files:**
+- Create: `console/src/lib/offsets.ts`
+- Create: `console/src/components/Highlighted.tsx`
+- Test: `console/tests/offsets.test.ts`
+
+Python and both the Japanese and Korean analysers count **code points**. JavaScript
+indexes **UTF-16 code units**. Feeding `item.start` straight into
+`text.slice()` mis-highlights silently the moment the text contains an emoji, a
+rare CJK ideograph above U+FFFF, or a mathematical alphanumeric — no error, just
+the wrong span. The API therefore reports `offset_unit`, and this task converts.
+
+- [ ] **Step 1: Write the failing test**
+
+```typescript
+// console/tests/offsets.test.ts
+import { describe, expect, it } from "vitest";
+import { codePointToUtf16 } from "@/lib/offsets";
+
+describe("codePointToUtf16", () => {
+  it("is identity for pure BMP text", () => {
+    const t = "東京へ行く";
+    for (let i = 0; i <= t.length; i++) expect(codePointToUtf16(t, i)).toBe(i);
+  });
+
+  it("accounts for a surrogate pair before the offset", () => {
+    const t = "𝕏東京"; // 𝕏 is U+1D54F, 2 UTF-16 units
+    expect(t.length).toBe(4);        // what JS indexes
+    expect([...t].length).toBe(3);   // what Python counts
+    expect(codePointToUtf16(t, 0)).toBe(0);
+    expect(codePointToUtf16(t, 1)).toBe(2);
+    expect(codePointToUtf16(t, 2)).toBe(3);
+    expect(codePointToUtf16(t, 3)).toBe(4);
+  });
+
+  it("lets you slice the right substring back out", () => {
+    const t = "𝕏東京";
+    const start = codePointToUtf16(t, 1);
+    const end = codePointToUtf16(t, 3);
+    expect(t.slice(start, end)).toBe("東京");
+  });
+
+  it("handles emoji", () => {
+    const t = "a😂b";
+    expect(codePointToUtf16(t, 2)).toBe(3);
+    expect(t.slice(codePointToUtf16(t, 1), codePointToUtf16(t, 2))).toBe("😂");
+  });
+
+  it("clamps past the end", () => {
+    expect(codePointToUtf16("abc", 99)).toBe(3);
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd console && npx vitest run tests/offsets.test.ts`
+Expected: FAIL — cannot resolve `@/lib/offsets`.
+
+- [ ] **Step 3: Write `console/src/lib/offsets.ts`**
+
+```typescript
+/**
+ * Convert a code-point offset (what the API emits) to a UTF-16 index (what
+ * JavaScript string methods need).
+ *
+ * Python and both analysers count code points. JS indexes UTF-16 code units.
+ * They agree for every BMP character and diverge the moment the text contains
+ * an emoji, a rare CJK ideograph above U+FFFF, or a mathematical alphanumeric.
+ * Passing offsets straight into `String.prototype.slice` therefore silently
+ * mis-highlights instead of throwing.
+ */
+export function codePointToUtf16(text: string, codePointOffset: number): number {
+  if (codePointOffset <= 0) return 0;
+  let codePoints = 0;
+  let utf16 = 0;
+  for (const ch of text) {
+    if (codePoints === codePointOffset) break;
+    codePoints += 1;
+    utf16 += ch.length; // 2 for surrogate pairs, 1 otherwise
+  }
+  return utf16;
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd console && npx vitest run tests/offsets.test.ts`
+Expected: 5 passed
+
+- [ ] **Step 5: Write `console/src/components/Highlighted.tsx`**
+
+Renders the original text with each lemma span marked. Degrades to plain text
+when the response carried no offsets (token input) or when a span would not slice
+back cleanly — Korean contracted verbs share one span between two morphemes, so
+`surface` is deliberately not compared for equality.
+
+```tsx
+"use client";
+
+import { codePointToUtf16 } from "@/lib/offsets";
+import type { LemmaItem } from "@/lib/types";
+
+export function Highlighted({
+  text,
+  items,
+  offsetUnit,
+  onHover,
+}: {
+  text: string;
+  items: LemmaItem[];
+  offsetUnit: "unicode_code_point" | null;
+  onHover?: (item: LemmaItem | null) => void;
+}) {
+  if (!offsetUnit || items.some((i) => i.start === undefined || i.end === undefined)) {
+    return <p className="font-mono text-sm">{text}</p>;
+  }
+
+  const marks = items.map((item) => ({
+    item,
+    start: codePointToUtf16(text, item.start!),
+    end: codePointToUtf16(text, item.end!),
+  }));
+
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  for (const [index, mark] of marks.entries()) {
+    if (mark.start > cursor) {
+      parts.push(<span key={`gap-${index}`}>{text.slice(cursor, mark.start)}</span>);
+    }
+    parts.push(
+      <mark
+        key={`mark-${index}`}
+        onMouseEnter={() => onHover?.(mark.item)}
+        onMouseLeave={() => onHover?.(null)}
+        className={
+          mark.item.prov === "identity"
+            ? "bg-amber-100 text-amber-900"
+            : "bg-emerald-100 text-emerald-900"
+        }
+      >
+        {text.slice(mark.start, mark.end)}
+      </mark>,
+    );
+    cursor = Math.max(cursor, mark.end);
+  }
+  if (cursor < text.length) {
+    parts.push(<span key="tail">{text.slice(cursor)}</span>);
+  }
+
+  return <p className="font-mono text-sm leading-relaxed">{parts}</p>;
+}
+```
+
+- [ ] **Step 6: Use it in the Playground result block**
+
+In `console/src/components/ResultTable.tsx`, render the highlighted original above
+the table when the request used `text`. Pass the submitted text through
+`PlaygroundState` by adding `text?: string` to the `ok` variant in
+`console/src/app/actions/lemmatize.ts` and returning it only for the text path.
+
+- [ ] **Step 7: Run tests and build**
+
+Run: `cd console && npx vitest run && npm run build`
+Expected: all pass, build succeeds.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add console/src/lib/offsets.ts console/src/components/Highlighted.tsx console/tests/offsets.test.ts console/src/components/ResultTable.tsx console/src/app/actions/lemmatize.ts
+git commit -m "feat: convert code-point offsets to UTF-16 for highlighting"
 ```
 
 ---
@@ -2049,18 +2254,68 @@ git commit -m "feat: add read-only diagnostics and whitelisted settings editor"
 ```tsx
 import { api } from "@/lib/server";
 import { getAdminToken } from "@/lib/session";
-import type { AuditEntry } from "@/lib/types";
+import type { AuditEntry, RequestRow } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 export default async function LogsPage() {
   const token = await getAdminToken();
   if (!token) return null;
-  const entries: AuditEntry[] = await api().readAudit(token, 100, 0);
+  const [entries, requests] = await Promise.all([
+    api().readAudit(token, 100, 0),
+    api().readRequests(token, 100, 0),
+  ]);
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-10">
-      <h1 className="text-2xl font-semibold tracking-tight">Audit log</h1>
+    <main className="mx-auto max-w-6xl space-y-12 px-6 py-10">
+      <section>
+      <h1 className="text-2xl font-semibold tracking-tight">Recent requests</h1>
+      <p className="mt-1 text-sm text-slate-600">
+        Request <em>shape</em> only — language, token count, latency, status. Request text is
+        deliberately never stored, so this is not a transcript of what anyone sent.
+      </p>
+      <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+            <tr>
+              <th className="px-4 py-2">When</th>
+              <th className="px-4 py-2">Request</th>
+              <th className="px-4 py-2">Key</th>
+              <th className="px-4 py-2">Lang</th>
+              <th className="px-4 py-2">Tokens</th>
+              <th className="px-4 py-2">ms</th>
+              <th className="px-4 py-2">Status</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {requests.length === 0 && (
+              <tr>
+                <td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">
+                  No requests recorded yet.
+                </td>
+              </tr>
+            )}
+            {(requests as RequestRow[]).map((r) => (
+              <tr key={r.id} className={r.status >= 400 ? "bg-rose-50/40" : ""}>
+                <td className="px-4 py-2 font-mono text-xs text-slate-500">{r.at}</td>
+                <td className="px-4 py-2 font-mono text-xs">{r.request_id}</td>
+                <td className="px-4 py-2 font-mono text-xs">{r.key_id ?? "—"}</td>
+                <td className="px-4 py-2 font-mono text-xs">{r.lang ?? "—"}</td>
+                <td className="px-4 py-2 text-xs">{r.n_tokens ?? "—"}</td>
+                <td className="px-4 py-2 text-xs">{r.latency_ms}</td>
+                <td className="px-4 py-2 text-xs">
+                  {r.status}
+                  {r.error_code ? ` ${r.error_code}` : ""}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      </section>
+
+      <section>
+      <h2 className="text-2xl font-semibold tracking-tight">Audit log</h2>
       <p className="mt-1 text-sm text-slate-600">
         Every key and setting mutation is recorded with its before and after values.
       </p>
@@ -2098,6 +2353,7 @@ export default async function LogsPage() {
           </tbody>
         </table>
       </div>
+      </section>
     </main>
   );
 }

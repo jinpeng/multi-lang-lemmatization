@@ -41,7 +41,7 @@ The non-HTTP modules (crypto, schema, key store, HMAC, nonce cache, rate limiter
 | Plan | Covers | Status |
 |---|---|---|
 | Plan 1 | M1+M2 — 7 backends, `/v1/lemmatize`, `/v1/languages`, `/v1/health` | written, verified |
-| **This plan** | M3+M5 — Key/Secret, Bearer+HMAC, rate limit, SQLite, settings whitelist, audit | being written now |
+| **This plan** | M3+M5 — Key/Secret, Bearer+HMAC, rate limit, SQLite, settings whitelist, audit, request log | crypto + logger verified (59 tests); HTTP layer written |
 | Plan 3 | M4+M6 — Next.js console (BFF), admin session, Playground, Docker images | next |
 
 This plan does **not** touch the console. It exposes the admin HTTP surface the console will call.
@@ -1803,6 +1803,383 @@ Expected: 24 passed (11 auth + 13 from Plan 1)
 ```bash
 git add api/main.py api/routes/lemmatize.py api/auth/deps.py
 git commit -m "feat: wire auth dependency into app assembly and lemmatize route"
+```
+
+---
+
+## Task 7c: Batched request logging
+
+**Files:**
+- Create: `api/obs/__init__.py`
+- Create: `api/obs/requestlog.py`
+- Modify: `api/main.py` (middleware + flusher)
+- Modify: `api/routes/admin_settings.py` (expose recent requests to the console)
+- Test: `tests/test_requestlog.py`
+
+Two constraints shape this, and both are easy to get wrong:
+
+1. **Never store request text.** Spec open item 3 decided this. Only the *shape* of a request is kept — language, token count, byte count. Writing bodies here would quietly turn a lemmatization API into a PII store.
+2. **No SQLite write on the hot path.** Every request would otherwise contend for the single writer lock with `/v1/lemmatize`, which is the one path that must stay fast. Records are queued in memory and flushed in bounded batches.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_requestlog.py
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from api.db import init_db, session
+from api.obs.requestlog import RequestLogger, count, purge_older_than
+
+
+@pytest.fixture
+def url(tmp_path):
+    u = f"sqlite:///{tmp_path / 't.db'}"
+    init_db(u)
+    return u
+
+
+def _rec(logger, **over):
+    base = dict(
+        request_id="req_1", key_id="lk_a", lang="de", n_tokens=2,
+        bytes_in=32, latency_ms=5, status=200, error_code=None, ip="127.0.0.1",
+    )
+    base.update(over)
+    logger.record(**base)
+
+
+def test_record_does_not_write_until_flush(url):
+    logger = RequestLogger(url)
+    _rec(logger)
+    assert logger.pending() == 1
+    assert count(url) == 0
+
+
+def test_flush_persists_the_batch(url):
+    logger = RequestLogger(url)
+    _rec(logger)
+    assert logger.flush() == 1
+    assert count(url) == 1
+    assert logger.pending() == 0
+
+
+def test_flush_is_bounded_and_leaves_the_rest_queued(url):
+    logger = RequestLogger(url)
+    for i in range(10):
+        _rec(logger, request_id=f"req_{i}")
+    assert logger.flush(limit=4) == 4
+    assert logger.pending() == 6
+    assert logger.flush_all() == 6
+    assert logger.pending() == 0
+
+
+def test_no_request_text_column_is_stored(url):
+    """Only shape is retained. Guard against a future body/PII column."""
+    logger = RequestLogger(url)
+    _rec(logger)
+    logger.flush()
+    with session(url) as conn:
+        cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(request_log)")}
+    assert cols == {
+        "id", "at", "request_id", "key_id", "lang", "n_tokens",
+        "bytes_in", "latency_ms", "status", "error_code", "ip",
+    }
+    assert not any(c in cols for c in ("body", "text", "payload", "query"))
+
+
+def test_queue_overflow_is_counted_not_silent():
+    logger = RequestLogger("sqlite://", max_queue=3)
+    for i in range(5):
+        _rec(logger, request_id=f"r{i}")
+    assert logger.pending() == 3
+    assert logger.dropped == 2
+
+
+def test_purge_removes_only_old_rows(url):
+    logger = RequestLogger(url)
+    _rec(logger)
+    logger.flush()
+    with session(url) as conn:
+        old = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.exec_driver_sql(
+            """INSERT INTO request_log
+               (at, request_id, key_id, lang, n_tokens, bytes_in, latency_ms,
+                status, error_code, ip)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (old, "req_old", "lk_a", "de", 1, 8, 1, 200, None, None),
+        )
+    assert count(url) == 2
+    assert purge_older_than(url, days=7) == 1
+    assert count(url) == 1
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `uv run pytest tests/test_requestlog.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'api.obs'`
+
+- [ ] **Step 3: Write `api/obs/requestlog.py`**
+
+```python
+"""Batched request logging.
+
+Two constraints shaped this:
+
+1. Must not store request text (spec open item 3). Only shape is kept: language,
+   token count, byte count. Storing bodies would turn this into a PII store.
+2. Must not put a SQLite write on the hot path. Every request would contend for
+   the single writer lock with `/v1/lemmatize`, which is the one thing that has
+   to stay fast. Records are queued and written in batches by a flusher.
+"""
+
+from __future__ import annotations
+
+import threading
+from collections import deque
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+
+from api.db import session
+
+MAX_QUEUE = 10_000
+BATCH_SIZE = 200
+RETENTION_DAYS = 7
+
+
+@dataclass(frozen=True)
+class Record:
+    at: str
+    request_id: str
+    key_id: str | None
+    lang: str | None
+    n_tokens: int | None
+    bytes_in: int | None
+    latency_ms: int
+    status: int
+    error_code: str | None
+    ip: str | None
+
+
+def _now() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class RequestLogger:
+    def __init__(self, url: str, max_queue: int = MAX_QUEUE) -> None:
+        self._url = url
+        self._queue: deque[Record] = deque(maxlen=max_queue)
+        self._lock = threading.Lock()
+        self.dropped = 0
+
+    def record(
+        self,
+        *,
+        request_id: str,
+        key_id: str | None,
+        lang: str | None,
+        n_tokens: int | None,
+        bytes_in: int | None,
+        latency_ms: int,
+        status: int,
+        error_code: str | None,
+        ip: str | None,
+    ) -> None:
+        rec = Record(
+            at=_now(), request_id=request_id, key_id=key_id, lang=lang,
+            n_tokens=n_tokens, bytes_in=bytes_in, latency_ms=latency_ms,
+            status=status, error_code=error_code, ip=ip,
+        )
+        with self._lock:
+            # deque(maxlen=...) silently evicts the oldest; count it so a
+            # sustained overflow is visible instead of looking like quiet loss.
+            if len(self._queue) == self._queue.maxlen:
+                self.dropped += 1
+            self._queue.append(rec)
+
+    def pending(self) -> int:
+        with self._lock:
+            return len(self._queue)
+
+    def flush(self, limit: int = BATCH_SIZE) -> int:
+        with self._lock:
+            batch = [self._queue.popleft() for _ in range(min(limit, len(self._queue)))]
+        if not batch:
+            return 0
+        with session(self._url) as conn:
+            conn.exec_driver_sql(
+                """INSERT INTO request_log
+                   (at, request_id, key_id, lang, n_tokens, bytes_in,
+                    latency_ms, status, error_code, ip)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    (
+                        r.at, r.request_id, r.key_id, r.lang, r.n_tokens,
+                        r.bytes_in, r.latency_ms, r.status, r.error_code, r.ip,
+                    )
+                    for r in batch
+                ],
+            )
+        return len(batch)
+
+    def flush_all(self) -> int:
+        total = 0
+        while True:
+            written = self.flush()
+            total += written
+            if written == 0:
+                return total
+
+
+def purge_older_than(url: str, days: int = RETENTION_DAYS) -> int:
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with session(url) as conn:
+        result = conn.exec_driver_sql("DELETE FROM request_log WHERE at < ?", (cutoff,))
+        return result.rowcount
+
+
+def count(url: str) -> int:
+    with session(url) as conn:
+        return conn.exec_driver_sql("SELECT COUNT(*) FROM request_log").scalar() or 0
+
+
+def recent(url: str, limit: int = 100, offset: int = 0) -> list[dict]:
+    with session(url) as conn:
+        rows = conn.exec_driver_sql(
+            """SELECT id, at, request_id, key_id, lang, n_tokens, bytes_in,
+                      latency_ms, status, error_code, ip
+               FROM request_log ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (limit, offset),
+        ).mappings().all()
+    return [dict(r) for r in rows]
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `uv run pytest tests/test_requestlog.py -v`
+Expected: 6 passed
+
+> **Verified by mutation before this plan was published:** making `flush()` a
+> no-op, making `purge_older_than` ignore its cutoff, and removing the overflow
+> counter each fail this suite. A logger that silently writes nothing is the
+> failure mode that matters here, so it is worth the three mutations.
+
+- [ ] **Step 5: Wire the middleware and flusher into `api/main.py`**
+
+Add to the imports:
+
+```python
+from api.obs.requestlog import RequestLogger, purge_older_than
+```
+
+Inside `create_app()`, after `app.state.nonces = NonceCache()`:
+
+```python
+    app.state.request_log = RequestLogger(app.state.db_url)
+    purge_older_than(app.state.db_url)
+```
+
+Add the middleware and a lifespan flusher. The middleware must not read the body
+itself — `api/auth/deps.py` already stashes `request.state.body_bytes`, so reuse
+that and fall back to the `content-length` header:
+
+```python
+    @app.middleware("http")
+    async def _request_log_middleware(request: Request, call_next):
+        started = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            request.app.state.request_log.record(
+                request_id=getattr(request.state, "request_id", "-"),
+                key_id=getattr(getattr(request.state, "key", None), "key_id", None),
+                lang=None, n_tokens=None,
+                bytes_in=len(getattr(request.state, "body_bytes", b"") or b""),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                status=500, error_code="INTERNAL",
+                ip=request.client.host if request.client else None,
+            )
+            raise
+
+        key = getattr(request.state, "key", None)
+        request.app.state.request_log.record(
+            request_id=getattr(request.state, "request_id", "-"),
+            key_id=key.key_id if key else None,
+            lang=getattr(request.state, "lang", None),
+            n_tokens=getattr(request.state, "n_tokens", None),
+            bytes_in=len(getattr(request.state, "body_bytes", b"") or b""),
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            status=response.status_code,
+            error_code=getattr(request.state, "error_code", None),
+            ip=request.client.host if request.client else None,
+        )
+        response.headers["X-Request-Id"] = getattr(request.state, "request_id", "-")
+        return response
+```
+
+And a background flusher using FastAPI's lifespan so nothing is lost on shutdown:
+
+```python
+import asyncio
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    async def _loop():
+        while True:
+            await asyncio.sleep(5)
+            try:
+                app.state.request_log.flush()
+            except Exception:  # noqa: BLE001 - logging must never kill the app
+                log.warning("request_log flush failed", exc_info=True)
+
+    task = asyncio.create_task(_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        app.state.request_log.flush_all()  # drain on shutdown
+```
+
+Pass it to the app: `FastAPI(title="Lemma API", version="0.3.0", lifespan=_lifespan)`.
+
+- [ ] **Step 6: Have the lemmatize route report shape for the log**
+
+In `api/routes/lemmatize.py`, after the request_id is assigned, set what the
+middleware reads. Add nothing that contains user text:
+
+```python
+    request.state.lang = payload.lang
+    request.state.n_tokens = len(payload.tokens) if payload.tokens is not None else None
+```
+
+- [ ] **Step 7: Expose recent requests to the console**
+
+Append to `api/routes/admin_settings.py`:
+
+```python
+@router.get("/requests")
+def recent_requests(request: Request, limit: int = 100, offset: int = 0) -> dict:
+    """Request shapes only - never text. See api/obs/requestlog.py."""
+    from api.obs.requestlog import recent
+
+    return {"requests": recent(request.app.state.db_url, limit, offset)}
+```
+
+- [ ] **Step 8: Run the full suite**
+
+Run: `uv run pytest -q`
+Expected: all pass, including Plan 1's 124 tests.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add api/obs api/main.py api/routes/lemmatize.py api/routes/admin_settings.py tests/test_requestlog.py
+git commit -m "feat: add batched request logging with retention and no PII columns"
 ```
 
 ---

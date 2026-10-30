@@ -45,7 +45,7 @@ The spec covers four separable subsystems. They are planned separately, each pro
 
 | Plan | Covers | Status |
 |---|---|---|
-| **This plan** | M1+M2 — project scaffolding, 7 backends, `/v1/lemmatize`, `/v1/languages`, `/v1/health` | being written now |
+| **This plan** | M1+M2 — project scaffolding, 7 backends, `/v1/lemmatize`, `/v1/languages`, `/v1/health`, character offsets | **verified, 124 tests** |
 | Plan 2 | M3+M5 — API Key/Secret, Bearer, HMAC, rate limit, SQLite, settings whitelist, audit | not yet written |
 | Plan 3 | M4+M6 — Next.js console (BFF), admin session, Playground, Docker images | not yet written |
 
@@ -237,6 +237,25 @@ def test_lemma_item_keeps_explicit_null_pos():
     assert out["pos"] is None
 
 
+def test_lemma_item_omits_offsets_when_unknown():
+    item = LemmaItem(surface="Haus", lemma="Haus")
+    out = item.to_json()
+    assert "start" not in out and "end" not in out
+
+
+def test_lemma_item_includes_offsets_when_known():
+    item = LemmaItem(surface="Haus", lemma="Haus", start=9, end=13)
+    out = item.to_json()
+    assert (out["start"], out["end"]) == (9, 13)
+
+
+def test_lemma_item_omits_offsets_if_only_one_bound_is_set():
+    """A half-open span is meaningless; drop both rather than emit a lie."""
+    item = LemmaItem(surface="Haus", lemma="Haus", start=9)
+    out = item.to_json()
+    assert "start" not in out and "end" not in out
+
+
 def test_pos_produced_and_pos_accepted_are_independent():
     """English accepts a tag but emits none; Russian emits one but takes none."""
     english = Capabilities(pos=False, pos_accepted=True)
@@ -311,6 +330,8 @@ class LemmaItem:
     prov: Prov = "dict"
     reading: str | None = None
     candidates: tuple[str, ...] = ()
+    start: int | None = None
+    end: int | None = None
 
     def to_json(self) -> dict:
         out: dict = {
@@ -323,13 +344,18 @@ class LemmaItem:
             out["reading"] = self.reading
         if self.candidates:
             out["candidates"] = list(self.candidates)
+        # Offsets are omitted only when genuinely unavailable (caller sent
+        # `tokens`, so there is no source string to point into).
+        if self.start is not None and self.end is not None:
+            out["start"] = self.start
+            out["end"] = self.end
         return out
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_types.py -v`
-Expected: 5 passed
+Expected: 8 passed
 
 - [ ] **Step 5: Commit**
 
@@ -435,7 +461,7 @@ git commit -m "feat: add ApiError with unified error envelope"
 
 ```python
 # tests/test_textutil.py
-from api.textutil import fallback_tokenize
+from api.textutil import fallback_tokenize, tokenize_with_offsets
 
 
 def test_tokenize_latin_sentence():
@@ -450,6 +476,38 @@ def test_tokenize_cyrillic_sentence():
 
 def test_tokenize_empty_string_returns_empty_list():
     assert fallback_tokenize("") == []
+
+
+def test_tokenize_with_offsets_slices_back_to_each_token():
+    text = "Hier sind Häuser."
+    spans = tokenize_with_offsets(text)
+    assert [t for t, _, _ in spans] == ["Hier", "sind", "Häuser", "."]
+    for token, start, end in spans:
+        assert text[start:end] == token
+
+
+def test_tokenize_with_offsets_never_matches_an_earlier_occurrence():
+    """The cursor must move forward, so repeated tokens get distinct spans."""
+    text = "a a a"
+    spans = tokenize_with_offsets(text)
+    assert [(s, e) for _, s, e in spans] == [(0, 1), (2, 3), (4, 5)]
+
+
+def test_tokenize_with_offsets_reports_code_points():
+    """Offsets count code points, so a surrogate pair is 1 wide, not 2.
+
+    𝕏 is U+1D54F: one code point, two UTF-16 units. If these were UTF-16
+    indices the span would end at 4 instead of 3.
+    """
+    text = "𝕏東京"
+    assert len(text) == 3
+    assert len(text.encode("utf-16-le")) // 2 == 4
+    spans = tokenize_with_offsets(text)
+    assert spans == [("𝕏東京", 0, 3)]
+
+
+def test_tokenize_with_offsets_empty():
+    assert tokenize_with_offsets("") == []
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -477,6 +535,28 @@ def fallback_tokenize(text: str) -> list[str]:
     if not text:
         return []
     return simple_tokenizer(text)
+
+
+def tokenize_with_offsets(text: str) -> list[tuple[str, int, int]]:
+    """Tokenize and locate each token in `text` as a CODE POINT span.
+
+    simple_tokenizer does not report positions, so each token is located with a
+    forward-moving cursor. Tokens come out in source order, so the scan is
+    linear overall and a token can never match an earlier occurrence.
+
+    Code points, not UTF-16 code units: Python and both ja/ko analysers count
+    code points. See the note in the response contract (Task 12b).
+    """
+    spans: list[tuple[str, int, int]] = []
+    cursor = 0
+    for token in simple_tokenizer(text):
+        start = text.find(token, cursor)
+        if start < 0:  # tokenizer normalised something; keep order, keep cursor
+            start = cursor
+        end = start + len(token)
+        spans.append((token, start, end))
+        cursor = end
+    return spans
 ```
 
 `api/backends/__init__.py`: empty file.
@@ -523,7 +603,7 @@ class BaseBackend(ABC):
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_textutil.py -v`
-Expected: 3 passed
+Expected: 7 passed
 
 - [ ] **Step 5: Commit**
 
@@ -817,7 +897,7 @@ from typing import Any
 import simplemma
 
 from api.backends.base import BaseBackend
-from api.textutil import fallback_tokenize
+from api.textutil import fallback_tokenize, tokenize_with_offsets
 from api.types import Capabilities, LemmaItem
 
 # Language -> greedy default. `de` needs the second reduction for compound and
@@ -848,13 +928,26 @@ class SimplemmaBackend(BaseBackend):
         options: dict[str, Any],
     ) -> list[LemmaItem]:
         greedy = bool(options.get("greedy", self.greedy))
-        surfaces = tokens if tokens is not None else fallback_tokenize(text or "")
+
+        # Offsets exist only when we tokenized the text ourselves. With
+        # caller-supplied tokens there is no source string to point into.
+        if tokens is not None:
+            spans: list[tuple[str, int | None, int | None]] = [
+                (t, None, None) for t in tokens
+            ]
+        else:
+            spans = list(tokenize_with_offsets(text or ""))
 
         items: list[LemmaItem] = []
-        for surface in surfaces:
+        for surface, start, end in spans:
             lemma = simplemma.lemmatize(surface, lang=self.lang, greedy=greedy)
             prov = "dict" if lemma != surface else "identity"
-            items.append(LemmaItem(surface=surface, lemma=lemma, pos=None, prov=prov))
+            items.append(
+                LemmaItem(
+                    surface=surface, lemma=lemma, pos=None, prov=prov,
+                    start=start, end=end,
+                )
+            )
         return items
 
 
@@ -980,7 +1073,7 @@ from typing import Any
 from lemminflect import getAllLemmas, getLemma
 
 from api.backends.base import BaseBackend
-from api.textutil import fallback_tokenize
+from api.textutil import fallback_tokenize, tokenize_with_offsets
 from api.types import Capabilities, LemmaItem
 
 
@@ -1012,10 +1105,15 @@ class LemmInflectBackend(BaseBackend):
         pos: list[str | None] | None,
         options: dict[str, Any],
     ) -> list[LemmaItem]:
-        surfaces = tokens if tokens is not None else fallback_tokenize(text or "")
+        if tokens is not None:
+            spans: list[tuple[str, int | None, int | None]] = [
+                (t, None, None) for t in tokens
+            ]
+        else:
+            spans = list(tokenize_with_offsets(text or ""))
 
         items: list[LemmaItem] = []
-        for index, surface in enumerate(surfaces):
+        for index, (surface, start, end) in enumerate(spans):
             tag = pos[index] if pos is not None and index < len(pos) else None
             try:
                 if tag:
@@ -1027,7 +1125,10 @@ class LemmInflectBackend(BaseBackend):
 
             if not found or found[0] == surface:
                 items.append(
-                    LemmaItem(surface=surface, lemma=surface, pos=None, prov="identity")
+                    LemmaItem(
+                        surface=surface, lemma=surface, pos=None, prov="identity",
+                        start=start, end=end,
+                    )
                 )
                 continue
 
@@ -1038,6 +1139,7 @@ class LemmInflectBackend(BaseBackend):
                     pos=None,
                     prov="dict",
                     candidates=tuple(found) if len(found) > 1 else (),
+                    start=start, end=end,
                 )
             )
         return items
@@ -1136,7 +1238,7 @@ from typing import Any
 import pymorphy3
 
 from api.backends.base import BaseBackend
-from api.textutil import fallback_tokenize
+from api.textutil import fallback_tokenize, tokenize_with_offsets
 from api.types import Capabilities, LemmaItem
 
 
@@ -1157,14 +1259,22 @@ class PymorphyBackend(BaseBackend):
         pos: list[str | None] | None,
         options: dict[str, Any],
     ) -> list[LemmaItem]:
-        surfaces = tokens if tokens is not None else fallback_tokenize(text or "")
+        if tokens is not None:
+            spans: list[tuple[str, int | None, int | None]] = [
+                (t, None, None) for t in tokens
+            ]
+        else:
+            spans = list(tokenize_with_offsets(text or ""))
 
         items: list[LemmaItem] = []
-        for surface in surfaces:
+        for surface, start, end in spans:
             parses = self._morph.parse(surface)
             if not parses:
                 items.append(
-                    LemmaItem(surface=surface, lemma=surface, pos=None, prov="identity")
+                    LemmaItem(
+                        surface=surface, lemma=surface, pos=None, prov="identity",
+                        start=start, end=end,
+                    )
                 )
                 continue
 
@@ -1172,7 +1282,12 @@ class PymorphyBackend(BaseBackend):
             lemma = best.normal_form
             tag = getattr(best.tag, "POS", None)
             prov = "dict" if lemma.lower() != surface.lower() else "identity"
-            items.append(LemmaItem(surface=surface, lemma=lemma, pos=tag, prov=prov))
+            items.append(
+                LemmaItem(
+                    surface=surface, lemma=lemma, pos=tag, prov=prov,
+                    start=start, end=end,
+                )
+            )
         return items
 
 
@@ -1344,7 +1459,8 @@ class SudachiBackend(BaseBackend):
             prov = "dict" if lemma != surface else "identity"
             items.append(
                 LemmaItem(
-                    surface=surface, lemma=lemma, pos=pos, prov=prov, reading=reading
+                    surface=surface, lemma=lemma, pos=pos, prov=prov, reading=reading,
+                    start=m.begin(), end=m.end(),
                 )
             )
         return items
@@ -1495,7 +1611,12 @@ class KiwiBackend(BaseBackend):
             tag = token.tag
             lemma = self._dictionary_form(form, tag)
             prov = "dict" if lemma != form else "identity"
-            items.append(LemmaItem(surface=form, lemma=lemma, pos=tag, prov=prov))
+            items.append(
+                LemmaItem(
+                    surface=form, lemma=lemma, pos=tag, prov=prov,
+                    start=token.start, end=token.start + token.len,
+                )
+            )
         return items
 
 
@@ -1869,8 +1990,21 @@ class _FakeBackend:
     def lemmatize(self, text, tokens, pos, options):
         from api.types import LemmaItem
 
-        surfaces = tokens if tokens is not None else (text or "").split()
-        return [LemmaItem(surface=s, lemma=s.lower()) for s in surfaces]
+        # Mirrors the real backends' contract: offsets when we tokenized the
+        # text ourselves, none when the caller supplied tokens.
+        if tokens is not None:
+            return [LemmaItem(surface=t, lemma=t.lower()) for t in tokens]
+
+        items = []
+        cursor = 0
+        for surface in (text or "").split():
+            start = (text or "").find(surface, cursor)
+            end = start + len(surface)
+            cursor = end
+            items.append(
+                LemmaItem(surface=surface, lemma=surface.lower(), start=start, end=end)
+            )
+        return items
 
 
 def build_registry(use_fakes: bool = False) -> Registry:
@@ -2178,8 +2312,11 @@ def lemmatize(payload: LemmatizeRequest, request: Request) -> dict:
         if item.prov == "identity"
     ]
 
+    has_offsets = any(i.start is not None for i in items)
+
     return {
         "request_id": request_id,
+        "offset_unit": "unicode_code_point" if has_offsets else None,
         "lang": payload.lang,
         "backend": {"name": backend.name, "version": backend.version},
         "segmented_by": segmented_by,
@@ -2199,6 +2336,147 @@ Expected: 13 passed
 ```bash
 git add api/routes/lemmatize.py tests/test_api_lemmatize.py
 git commit -m "feat: add POST /v1/lemmatize with capability-aware responses"
+```
+
+---
+
+## Task 12b: Character offsets
+
+**Files:**
+- Test: `tests/test_offsets.py`
+
+Offsets were already threaded through `LemmaItem`, the tokenizer and all five
+adapters in the tasks above, so this task only pins the contract.
+
+**Why `offset_unit` exists:** Python and both the Japanese and Korean analysers
+count **code points**. JavaScript indexes **UTF-16 code units**. They agree for
+every BMP character and diverge the moment the text contains an emoji, a rare
+CJK ideograph above U+FFFF, or a mathematical alphanumeric. A console that fed
+these offsets straight into `String.prototype.slice` would mis-highlight
+silently rather than throw, so the unit is stated in the response and the
+console converts (Plan 3 adds and tests that helper).
+
+- [ ] **Step 1: Write the tests**
+
+```python
+# tests/test_offsets.py
+"""Character offsets (spec open item 2).
+
+`start`/`end` are CODE POINT offsets into the request's `text`. They are omitted
+when the caller supplied `tokens`, because there is no source string to point
+into. `offset_unit` at the top level says which unit is in use.
+"""
+import pytest
+
+
+def _body(client, payload):
+    return client.post("/v1/lemmatize", json=payload).json()
+
+
+def test_offsets_present_when_text_is_tokenized(real_client):
+    body = _body(real_client, {"lang": "de", "text": "Hier sind Häuser."})
+    assert body["offset_unit"] == "unicode_code_point"
+    for item in body["items"]:
+        assert "start" in item and "end" in item
+
+
+def test_offsets_slice_back_to_the_surface(real_client):
+    text = "Hier sind Häuser."
+    body = _body(real_client, {"lang": "de", "text": text})
+    for item in body["items"]:
+        assert text[item["start"]:item["end"]] == item["surface"]
+
+
+def test_offsets_absent_for_token_input(real_client):
+    body = _body(real_client, {"lang": "de", "tokens": ["Häuser"]})
+    assert body["offset_unit"] is None
+    assert "start" not in body["items"][0]
+
+
+@pytest.mark.parametrize("lang,text", [
+    ("ru", "Он шёл домой."),
+    ("ja", "東京都へ行きました"),
+    ("ko", "먹었습니다"),
+])
+def test_offsets_are_ordered_and_within_bounds(real_client, lang, text):
+    body = _body(real_client, {"lang": lang, "text": text})
+    assert body["offset_unit"] == "unicode_code_point"
+    previous_end = 0
+    for item in body["items"]:
+        assert 0 <= item["start"] <= item["end"] <= len(text)
+        assert item["start"] >= previous_end or item["start"] == item["end"] - 1
+        previous_end = item["end"]
+
+
+def test_japanese_offsets_slice_exactly(real_client):
+    text = "東京都へ行きました"
+    body = _body(real_client, {"lang": "ja", "text": text})
+    for item in body["items"]:
+        assert text[item["start"]:item["end"]] == item["surface"]
+
+
+def test_korean_offsets_are_spans_not_surfaces(real_client):
+    """A contracted form is decomposed, so several morphemes share one span.
+
+    갔 is analysed as 가 + 었, both spanning the single character. Offsets still
+    point at the right place in the original text; `surface` is the morpheme,
+    not the substring. Consumers must not assume text[start:end] == surface.
+    """
+    text = "갔다"
+    body = _body(real_client, {"lang": "ko", "text": text})
+    verb = [i for i in body["items"] if i["pos"] == "VV"]
+    assert verb, "expected a verb stem"
+    assert (verb[0]["start"], verb[0]["end"]) == (0, 1)
+    assert text[0:1] == "갔"
+    assert verb[0]["surface"] != text[0:1]
+
+
+def test_offsets_survive_non_bmp_text(real_client):
+    """Code-point offsets must not be confused with UTF-16 indices."""
+    text = "𝕏東京"
+    body = _body(real_client, {"lang": "ja", "text": text})
+    tokyo = next(i for i in body["items"] if i["surface"] == "東京")
+    assert (tokyo["start"], tokyo["end"]) == (1, 3)
+    assert text[1:3] == "東京"
+```
+
+- [ ] **Step 2: Run the tests**
+
+Run: `uv run pytest tests/test_offsets.py -v`
+Expected: 9 passed
+
+> **Verified against the real analysers before this plan was published:**
+> SudachiPy returns `begin()`/`end()` that slice exactly (`東京都` -> `(0,3)`).
+> Kiwi returns `start`/`len` that are valid text spans but **do not** slice back
+> to `form` for contracted verbs, because 갔 decomposes into 가+었 sharing
+> `[0:1]`. `test_korean_offsets_are_spans_not_surfaces` encodes that; do not
+> "fix" it by asserting equality.
+
+- [ ] **Step 3: Update the response contract test in Task 12**
+
+The existing `test_response_carries_backend_identity_and_capabilities` should also
+confirm the new top-level key is present:
+
+```python
+def test_response_states_the_offset_unit(real_client):
+    body = real_client.post(
+        "/v1/lemmatize", json={"lang": "de", "text": "Häuser"}
+    ).json()
+    assert body["offset_unit"] == "unicode_code_point"
+
+
+def test_response_offset_unit_is_null_for_tokens(real_client):
+    body = real_client.post(
+        "/v1/lemmatize", json={"lang": "de", "tokens": ["Häuser"]}
+    ).json()
+    assert body["offset_unit"] is None
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add tests/test_offsets.py tests/test_api_lemmatize.py
+git commit -m "test: pin character-offset contract and offset_unit for all 7 languages"
 ```
 
 ---

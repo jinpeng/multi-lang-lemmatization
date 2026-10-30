@@ -177,21 +177,38 @@ class Backend(Protocol):
 ```json
 {
   "request_id": "req_01J...",
+  "offset_unit": "unicode_code_point",
   "lang": "ja",
   "backend": { "name": "sudachipy", "version": "0.6.10", "dict": "core-20240716" },
   "segmented_by": "backend",
-  "capabilities": { "pos": true, "pos_required": false, "candidates": false,
-                    "reading": true, "mwt": false, "tokenizes": true },
+  "capabilities": { "pos": true, "pos_accepted": false, "pos_required": false,
+                    "candidates": false, "reading": true, "mwt": false,
+                    "tokenizes": true },
   "items": [
-    { "surface": "東京", "lemma": "東京", "pos": "名詞-固有名詞-地名", "prov": "dict", "reading": "トウキョウ" },
-    { "surface": "へ", "lemma": "へ", "pos": "助詞-格助詞", "prov": "dict" },
-    { "surface": "行き", "lemma": "行く", "pos": "動詞-非自立可能", "prov": "dict", "reading": "イキ" },
-    { "surface": "ました", "lemma": "ます", "pos": "助動詞", "prov": "dict" }
+    { "surface": "東京", "lemma": "東京", "pos": "名詞-固有名詞-地名", "prov": "dict",
+      "reading": "トウキョウ", "start": 0, "end": 2 },
+    { "surface": "へ", "lemma": "へ", "pos": "助詞-格助詞", "prov": "dict",
+      "start": 2, "end": 3 },
+    { "surface": "行き", "lemma": "行く", "pos": "動詞-非自立可能", "prov": "dict",
+      "reading": "イキ", "start": 3, "end": 5 },
+    { "surface": "ました", "lemma": "ます", "pos": "助動詞", "prov": "dict",
+      "start": 5, "end": 8 }
   ],
   "warnings": [],
   "elapsed_ms": 3.1
 }
 ```
+
+`offset_unit` 取值与语义（决策见 §13）：
+
+- `"unicode_code_point"` — `start`/`end` 是 `text` 的 **码点**偏移
+- `null` — 本次响应不含偏移（调用方传的是 `tokens`，没有源串可指）
+
+字段 `start`/`end` 在无偏移时**整体省略**（不输出 `null`），因为半开区间缺一半是无意义的。
+
+» **JavaScript 消费者必须转换**：Python 与 ja/ko 分析器都按码点数，JS 字符串按 UTF-16 码元索引。二者在 BMP 内一致，一旦文本含 emoji、U+FFFF 以上的生僻汉字或数学字母就会出现**静默错位**（不报错、只是高亮范围偏移）。Console 的 `codePointToUtf16()` 负责这一步。
+
+» **`surface` 不一定等于 `text[start:end]`**：韩语「갔」会被分析为 `가/VV` + `었/EP`，两个形态素共享同一区间 `[0,1]`。`surface` 是形态素，不是原文子串。
 
 `segmented_by` 取值：
 
@@ -563,8 +580,32 @@ ko  먹었습니다→ 먹다  (segmented_by=backend)
 
 ---
 
-## 13. 待评审时需确认的开放项
+## 13. 开放项 — 已定稿
 
-1. **`ja`/`ko` 的 `pos` 是否要映射到统一标签集**（如 UD UPOS）？当前设计是**原样透出**（Sudachi 的 `名詞-固有名詞-地名`、Kiwi 的 `NNG`），因为映射会丢信息且需要维护映射表。倾向原样透出 + 在 `/v1/languages` 声明 `pos_scheme`。
-2. **是否需要响应级字符偏移**（`start`/`end`），让前端能把 lemma 高亮回原文？若需要，应在 M1 就加进 schema，否则后加是破坏性变更。倾向 **M1 就加**。
-3. `request_log` 是否需要保留请求文本？倾向 **不保留**（只存长度与 lang），避免成为 PII 存储点。
+三项均已在评审时确认，实施计划已按此实现。
+
+**13.1 `ja`/`ko` 的 `pos`：原样透出，不映射到 UD UPOS。**
+响应新增 `pos_scheme` 声明标签体系（`"ud"` / `"pymorphy"` / `"sudachi"` / `"sejong-kiwi"` / `null`）。映射到 UPOS 会丢掉 Sudachi 的 6 段品词与 Kiwi 的世宗细分标签，且需长期维护一张映射表。
+
+**13.1b `pos` 与 `pos_accepted` 必须分开（评审后追加的修正）**
+实现时发现英语（LemmInflect）**接受** `upos` 但**不产出**标签，而 `ru`/`ja`/`ko` 反过来。原本单一的 `pos` 字段会向客户端谎称「英语忽略词性」，让调用方在每个歧义词上白白损失精度：
+
+```
+left  + upos=VERB → leave     ← 动词的正确结果
+left  + upos=NOUN → left
+left  无 pos      → left      ← 取字典序，与动词用法不符
+```
+
+故 `Capabilities` 拆为 `pos`（产出）与 `pos_accepted`（接受）。
+
+**13.2 字符偏移：M1 就进 schema，采用码点。**
+理由：后加是破坏性变更。单位选码点因为它是 Python 与两个分析器的原生单位，无需在热路径上做 O(n) 转换；同时用顶层 `offset_unit` 显式声明，让 JS 消费者知道要转换。已用真实分析器验证：Sudachi 的 `begin()/end()` 精确切片；Kiwi 的 `start/len` 是合法区间但契约变形时不等于 `form`。
+
+**13.3 `request_log` 不保留请求文本。**
+只存形状：`lang`、`n_tokens`、`bytes_in`、`latency_ms`、`status`、`error_code`。存正文会让本服务变成 PII 存储点。已有测试 `test_no_request_text_column_is_stored` 钉住列集合，防止将来被加回。
+
+**13.4 顺带发现：Pydantic 违约与模块级导入崩溃**
+（实现阶段发现，已修正，记录以备回溯）
+
+- FastAPI 的 `RequestValidationError` 默认返回 422 + `{"detail": [...]}`，绕过了 §4.4 要求的统一错误信封——客户端解析 `error.code` 会失败。已加处理器映射为 `INVALID_REQUEST` / 400。
+- `build_registry` 原本在模块级导入全部后端模块，导致少装一个包就在所有 `try/except` 之外抛 `ImportError`，**七个语种全部起不来**，与 §3.3 的「单语种降级」承诺矛盾。已改为惰性导入。
