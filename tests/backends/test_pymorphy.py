@@ -40,4 +40,4 @@ def test_offsets_present_for_text():
     text = "Он шёл"
     items = backend.lemmatize(text=text, tokens=None, pos=None, options={})
     for item in items:
-        assert text[item.start:item.end] == item.surface
+        assert text[item.start : item.end] == item.surface

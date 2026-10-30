@@ -35,6 +35,7 @@ def lazy(module_name: str, *args, **kwargs) -> Callable[[], BaseBackend]:
     languages instead of degrading one. Import inside the closure so the
     failure lands where Registry.register can catch it.
     """
+
     def factory() -> BaseBackend:
         module = importlib.import_module(module_name)
         return module.build(*args, **kwargs)

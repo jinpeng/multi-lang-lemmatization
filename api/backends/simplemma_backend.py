@@ -47,9 +47,7 @@ class SimplemmaBackend(BaseBackend):
         # Offsets exist only when we tokenized the text ourselves. With
         # caller-supplied tokens there is no source string to point into.
         if tokens is not None:
-            spans: list[tuple[str, int | None, int | None]] = [
-                (t, None, None) for t in tokens
-            ]
+            spans: list[tuple[str, int | None, int | None]] = [(t, None, None) for t in tokens]
         else:
             spans = list(tokenize_with_offsets(text or ""))
 
@@ -59,8 +57,12 @@ class SimplemmaBackend(BaseBackend):
             prov = "dict" if lemma != surface else "identity"
             items.append(
                 LemmaItem(
-                    surface=surface, lemma=lemma, pos=None, prov=prov,
-                    start=start, end=end,
+                    surface=surface,
+                    lemma=lemma,
+                    pos=None,
+                    prov=prov,
+                    start=start,
+                    end=end,
                 )
             )
         return items

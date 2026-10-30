@@ -64,8 +64,13 @@ class SudachiBackend(BaseBackend):
             prov = "dict" if lemma != surface else "identity"
             items.append(
                 LemmaItem(
-                    surface=surface, lemma=lemma, pos=pos, prov=prov, reading=reading,
-                    start=m.begin(), end=m.end(),
+                    surface=surface,
+                    lemma=lemma,
+                    pos=pos,
+                    prov=prov,
+                    reading=reading,
+                    start=m.begin(),
+                    end=m.end(),
                 )
             )
         return items

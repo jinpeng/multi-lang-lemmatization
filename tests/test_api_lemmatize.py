@@ -1,7 +1,5 @@
 def test_lemmatize_german_tokens(real_client):
-    resp = real_client.post(
-        "/v1/lemmatize", json={"lang": "de", "tokens": ["Häuser"]}
-    )
+    resp = real_client.post("/v1/lemmatize", json={"lang": "de", "tokens": ["Häuser"]})
     assert resp.status_code == 200
     body = resp.json()
     assert body["lang"] == "de"
@@ -10,18 +8,14 @@ def test_lemmatize_german_tokens(real_client):
 
 
 def test_response_carries_backend_identity_and_capabilities(real_client):
-    body = real_client.post(
-        "/v1/lemmatize", json={"lang": "de", "tokens": ["Häuser"]}
-    ).json()
+    body = real_client.post("/v1/lemmatize", json={"lang": "de", "tokens": ["Häuser"]}).json()
     assert body["backend"]["name"] == "simplemma"
     assert "version" in body["backend"]
     assert "capabilities" in body
 
 
 def test_japanese_reports_segmented_by_backend(real_client):
-    body = real_client.post(
-        "/v1/lemmatize", json={"lang": "ja", "text": "食べました"}
-    ).json()
+    body = real_client.post("/v1/lemmatize", json={"lang": "ja", "text": "食べました"}).json()
     assert body["segmented_by"] == "backend"
     assert {i["surface"] for i in body["items"]} != {"食べました"}
 
@@ -32,9 +26,7 @@ def test_japanese_retokenizes_even_when_given_tokens(real_client):
     Sending both `text` and `tokens` is rejected by the schema, so this exercises
     the tokens-only path: SudachiPy joins the tokens and analyses the result.
     """
-    body = real_client.post(
-        "/v1/lemmatize", json={"lang": "ja", "tokens": ["食べました"]}
-    ).json()
+    body = real_client.post("/v1/lemmatize", json={"lang": "ja", "tokens": ["食べました"]}).json()
     assert body["segmented_by"] == "backend"
     surfaces = [i["surface"] for i in body["items"]]
     assert surfaces != ["食べました"], "output must not echo the caller's token 1:1"
@@ -49,9 +41,7 @@ def test_request_id_is_present_and_unique(real_client):
 
 
 def test_elapsed_ms_is_reported(real_client):
-    body = real_client.post(
-        "/v1/lemmatize", json={"lang": "de", "tokens": ["Häuser"]}
-    ).json()
+    body = real_client.post("/v1/lemmatize", json={"lang": "de", "tokens": ["Häuser"]}).json()
     assert isinstance(body["elapsed_ms"], (int, float))
     assert body["elapsed_ms"] >= 0
 
@@ -82,9 +72,7 @@ def test_unknown_language_is_rejected(real_client):
 
 def test_both_text_and_tokens_is_400_with_our_envelope(real_client):
     """Pydantic's default 422/detail envelope must not leak out."""
-    resp = real_client.post(
-        "/v1/lemmatize", json={"lang": "de", "text": "a", "tokens": ["a"]}
-    )
+    resp = real_client.post("/v1/lemmatize", json={"lang": "de", "text": "a", "tokens": ["a"]})
     assert resp.status_code == 400
     body = resp.json()
     assert body["error"]["code"] == "INVALID_REQUEST"
@@ -98,9 +86,7 @@ def test_missing_input_is_400_with_our_envelope(real_client):
 
 
 def test_list_pos_with_text_input_is_rejected(real_client):
-    resp = real_client.post(
-        "/v1/lemmatize", json={"lang": "de", "text": "Haus", "pos": ["NOUN"]}
-    )
+    resp = real_client.post("/v1/lemmatize", json={"lang": "de", "text": "Haus", "pos": ["NOUN"]})
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "INVALID_REQUEST"
 
@@ -124,14 +110,10 @@ def test_unavailable_backend_returns_503():
 
 
 def test_response_states_the_offset_unit(real_client):
-    body = real_client.post(
-        "/v1/lemmatize", json={"lang": "de", "text": "Häuser"}
-    ).json()
+    body = real_client.post("/v1/lemmatize", json={"lang": "de", "text": "Häuser"}).json()
     assert body["offset_unit"] == "unicode_code_point"
 
 
 def test_response_offset_unit_is_null_for_tokens(real_client):
-    body = real_client.post(
-        "/v1/lemmatize", json={"lang": "de", "tokens": ["Häuser"]}
-    ).json()
+    body = real_client.post("/v1/lemmatize", json={"lang": "de", "tokens": ["Häuser"]}).json()
     assert body["offset_unit"] is None

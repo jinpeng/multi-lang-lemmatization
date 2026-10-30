@@ -26,8 +26,12 @@ def test_lemma_item_omits_absent_optional_fields():
 
 def test_lemma_item_includes_reading_and_candidates_when_present():
     item = LemmaItem(
-        surface="食べ", lemma="食べる", pos="動詞", prov="dict",
-        reading="タベ", candidates=("食べる", "食べ"),
+        surface="食べ",
+        lemma="食べる",
+        pos="動詞",
+        prov="dict",
+        reading="タベ",
+        candidates=("食べる", "食べ"),
     )
     out = item.to_json()
     assert out["reading"] == "タベ"

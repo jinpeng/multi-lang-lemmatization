@@ -16,9 +16,7 @@ def languages(request: Request) -> dict:
                 "lang": entry.lang,
                 "status": entry.status,
                 "backend": (
-                    {"name": backend.name, "version": backend.version}
-                    if backend
-                    else None
+                    {"name": backend.name, "version": backend.version} if backend else None
                 ),
                 "reason": entry.reason,
                 "pos_scheme": backend.pos_scheme if backend else None,
@@ -26,8 +24,12 @@ def languages(request: Request) -> dict:
                     backend.capabilities.to_json()
                     if backend
                     else {
-                        "pos": False, "pos_accepted": False, "pos_required": False,
-                        "candidates": False, "reading": False, "mwt": False,
+                        "pos": False,
+                        "pos_accepted": False,
+                        "pos_required": False,
+                        "candidates": False,
+                        "reading": False,
+                        "mwt": False,
                         "tokenizes": False,
                     }
                 ),

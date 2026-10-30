@@ -4,6 +4,7 @@
 when the caller supplied `tokens`, because there is no source string to point
 into. `offset_unit` at the top level says which unit is in use.
 """
+
 import pytest
 
 
@@ -22,7 +23,7 @@ def test_offsets_slice_back_to_the_surface(real_client):
     text = "Hier sind Häuser."
     body = _body(real_client, {"lang": "de", "text": text})
     for item in body["items"]:
-        assert text[item["start"]:item["end"]] == item["surface"]
+        assert text[item["start"] : item["end"]] == item["surface"]
 
 
 def test_offsets_absent_for_token_input(real_client):
@@ -31,11 +32,14 @@ def test_offsets_absent_for_token_input(real_client):
     assert "start" not in body["items"][0]
 
 
-@pytest.mark.parametrize("lang,text", [
-    ("ru", "Он шёл домой."),
-    ("ja", "東京都へ行きました"),
-    ("ko", "먹었습니다"),
-])
+@pytest.mark.parametrize(
+    "lang,text",
+    [
+        ("ru", "Он шёл домой."),
+        ("ja", "東京都へ行きました"),
+        ("ko", "먹었습니다"),
+    ],
+)
 def test_offsets_are_ordered_and_within_bounds(real_client, lang, text):
     body = _body(real_client, {"lang": lang, "text": text})
     assert body["offset_unit"] == "unicode_code_point"
@@ -50,7 +54,7 @@ def test_japanese_offsets_slice_exactly(real_client):
     text = "東京都へ行きました"
     body = _body(real_client, {"lang": "ja", "text": text})
     for item in body["items"]:
-        assert text[item["start"]:item["end"]] == item["surface"]
+        assert text[item["start"] : item["end"]] == item["surface"]
 
 
 def test_korean_offsets_are_spans_not_surfaces(real_client):

@@ -40,7 +40,5 @@ def normalize_pos(
     if token_count is None:
         raise ValueError("list 'pos' requires 'tokens'; it cannot be matched against 'text'")
     if len(pos) != token_count:
-        raise ValueError(
-            f"'pos' length {len(pos)} does not match token count {token_count}"
-        )
+        raise ValueError(f"'pos' length {len(pos)} does not match token count {token_count}")
     return pos

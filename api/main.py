@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -44,9 +43,7 @@ class _FakeBackend:
             start = (text or "").find(surface, cursor)
             end = start + len(surface)
             cursor = end
-            items.append(
-                LemmaItem(surface=surface, lemma=surface.lower(), start=start, end=end)
-            )
+            items.append(LemmaItem(surface=surface, lemma=surface.lower(), start=start, end=end))
         return items
 
 
@@ -80,9 +77,7 @@ def create_app(registry: Registry | None = None) -> FastAPI:
         )
 
     @app.exception_handler(RequestValidationError)
-    async def _validation_handler(
-        request: Request, exc: RequestValidationError
-    ) -> JSONResponse:
+    async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
         """Pydantic failures default to HTTP 422 with a `detail` list.
 
         That envelope is not ours: spec section 4.4 requires error.code on every
@@ -93,10 +88,8 @@ def create_app(registry: Registry | None = None) -> FastAPI:
         first = errors[0] if errors else {}
         message = str(first.get("msg", "request validation failed"))
         if message.startswith("Value error, "):
-            message = message[len("Value error, "):]
-        error = ApiError(
-            "INVALID_REQUEST", 400, message, {"field": list(first.get("loc", []))}
-        )
+            message = message[len("Value error, ") :]
+        error = ApiError("INVALID_REQUEST", 400, message, {"field": list(first.get("loc", []))})
         return JSONResponse(
             status_code=400,
             content=error.to_json(getattr(request.state, "request_id", None)),

@@ -58,8 +58,12 @@ class KiwiBackend(BaseBackend):
             prov = "dict" if lemma != form else "identity"
             items.append(
                 LemmaItem(
-                    surface=form, lemma=lemma, pos=tag, prov=prov,
-                    start=token.start, end=token.start + token.len,
+                    surface=form,
+                    lemma=lemma,
+                    pos=tag,
+                    prov=prov,
+                    start=token.start,
+                    end=token.start + token.len,
                 )
             )
         return items

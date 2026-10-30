@@ -34,9 +34,7 @@ class PymorphyBackend(BaseBackend):
         options: dict[str, Any],
     ) -> list[LemmaItem]:
         if tokens is not None:
-            spans: list[tuple[str, int | None, int | None]] = [
-                (t, None, None) for t in tokens
-            ]
+            spans: list[tuple[str, int | None, int | None]] = [(t, None, None) for t in tokens]
         else:
             spans = list(tokenize_with_offsets(text or ""))
 
@@ -46,8 +44,12 @@ class PymorphyBackend(BaseBackend):
             if not parses:
                 items.append(
                     LemmaItem(
-                        surface=surface, lemma=surface, pos=None, prov="identity",
-                        start=start, end=end,
+                        surface=surface,
+                        lemma=surface,
+                        pos=None,
+                        prov="identity",
+                        start=start,
+                        end=end,
                     )
                 )
                 continue
@@ -58,8 +60,12 @@ class PymorphyBackend(BaseBackend):
             prov = "dict" if lemma.lower() != surface.lower() else "identity"
             items.append(
                 LemmaItem(
-                    surface=surface, lemma=lemma, pos=tag, prov=prov,
-                    start=start, end=end,
+                    surface=surface,
+                    lemma=lemma,
+                    pos=tag,
+                    prov=prov,
+                    start=start,
+                    end=end,
                 )
             )
         return items

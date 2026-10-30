@@ -9,8 +9,13 @@ def test_each_entry_has_full_capability_matrix(real_client):
     for entry in body["languages"]:
         caps = entry["capabilities"]
         assert set(caps) == {
-            "pos", "pos_accepted", "pos_required",
-            "candidates", "reading", "mwt", "tokenizes",
+            "pos",
+            "pos_accepted",
+            "pos_required",
+            "candidates",
+            "reading",
+            "mwt",
+            "tokenizes",
         }
         assert "pos_scheme" in entry
 

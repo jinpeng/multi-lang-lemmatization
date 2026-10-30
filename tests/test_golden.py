@@ -34,8 +34,5 @@ def test_golden_pos_contract(real_client, lang, payload, _lemma, posness):
 
 def test_all_seven_languages_are_healthy(real_client):
     body = real_client.get("/v1/health").json()
-    unavailable = {
-        lang: info for lang, info in body["backends"].items()
-        if info["status"] != "ok"
-    }
+    unavailable = {lang: info for lang, info in body["backends"].items() if info["status"] != "ok"}
     assert unavailable == {}, f"unavailable backends: {unavailable}"

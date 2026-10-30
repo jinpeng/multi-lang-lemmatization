@@ -77,9 +77,7 @@ def lemmatize(payload: LemmatizeRequest, request: Request) -> dict:
         segmented_by = "backend"
 
     warnings = [
-        {"code": "UNRESOLVED", "surface": item.surface}
-        for item in items
-        if item.prov == "identity"
+        {"code": "UNRESOLVED", "surface": item.surface} for item in items if item.prov == "identity"
     ]
 
     has_offsets = any(i.start is not None for i in items)

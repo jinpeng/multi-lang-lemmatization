@@ -48,9 +48,7 @@ def test_split_mode_option_changes_segmentation():
     merged = backend.lemmatize(
         text="国家公務員", tokens=None, pos=None, options={"split_mode": "C"}
     )
-    split = backend.lemmatize(
-        text="国家公務員", tokens=None, pos=None, options={"split_mode": "A"}
-    )
+    split = backend.lemmatize(text="国家公務員", tokens=None, pos=None, options={"split_mode": "A"})
     assert len(split) > len(merged)
 
 
@@ -65,7 +63,7 @@ def test_offsets_slice_back_exactly():
     text = "東京都へ行きました"
     items = backend.lemmatize(text=text, tokens=None, pos=None, options={})
     for item in items:
-        assert text[item.start:item.end] == item.surface
+        assert text[item.start : item.end] == item.surface
 
 
 def test_non_bmp_prefix_gives_code_point_offsets():

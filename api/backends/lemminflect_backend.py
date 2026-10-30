@@ -52,9 +52,7 @@ class LemmInflectBackend(BaseBackend):
         options: dict[str, Any],
     ) -> list[LemmaItem]:
         if tokens is not None:
-            spans: list[tuple[str, int | None, int | None]] = [
-                (t, None, None) for t in tokens
-            ]
+            spans: list[tuple[str, int | None, int | None]] = [(t, None, None) for t in tokens]
         else:
             spans = list(tokenize_with_offsets(text or ""))
 
@@ -72,8 +70,12 @@ class LemmInflectBackend(BaseBackend):
             if not found or found[0] == surface:
                 items.append(
                     LemmaItem(
-                        surface=surface, lemma=surface, pos=None, prov="identity",
-                        start=start, end=end,
+                        surface=surface,
+                        lemma=surface,
+                        pos=None,
+                        prov="identity",
+                        start=start,
+                        end=end,
                     )
                 )
                 continue
@@ -85,7 +87,8 @@ class LemmInflectBackend(BaseBackend):
                     pos=None,
                     prov="dict",
                     candidates=tuple(found) if len(found) > 1 else (),
-                    start=start, end=end,
+                    start=start,
+                    end=end,
                 )
             )
         return items

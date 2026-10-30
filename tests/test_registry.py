@@ -1,5 +1,3 @@
-import pytest
-
 from api.backends.registry import Registry, lazy
 from api.types import Capabilities, LemmaItem
 
