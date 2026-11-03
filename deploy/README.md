@@ -2,19 +2,35 @@
 
 ## First run
 
+All commands below run in **`deploy/`**. Compose reads `.env` from the directory
+holding `docker-compose.yml`, so a `.env` placed at the repo root is silently
+ignored — and the resulting error names a missing variable, not the wrong path.
+
 ```bash
-export LEMMA_MASTER_KEY=$(python -c 'import secrets; print(secrets.token_hex(32))')
-# Write the escaped line straight into .env -- do not hand-edit the hash:
-# compose interpolates '$', and argon2 hashes are full of them.
+cd deploy
+cp .env_example .env
+
+# Generate the three required values; do not invent them.
+echo "LEMMA_MASTER_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')" >> .env
+echo "LEMMA_SERVICE_TOKEN=svc-$(python3 -c 'import secrets; print(secrets.token_hex(16))')" >> .env
+# Compose interpolates '$' and argon2 hashes are full of them, so generate the
+# escaped line rather than pasting a raw hash:
 python -m api.cli env-line 'your passphrase' >> .env
 
 docker compose up -d --build
 docker compose exec api python -m api.cli create-key --name console-demo --allow-hmac
 ```
 
-Put the printed `key_id.secret` into `LEMMA_DEMO_KEY` in `.env` and restart `console`.
+Put the printed `key_id.secret` into `LEMMA_DEMO_KEY` in `.env`, then:
 
-Open http://localhost:3000, sign in with the passphrase.
+```bash
+docker compose up -d console
+```
+
+Open http://localhost:3000 and sign in with the passphrase.
+
+`.env_example` documents every variable, including the ones the image sets
+itself and that must not be overridden.
 
 ## Secrets you must not lose
 
@@ -89,10 +105,3 @@ docker compose logs -f api console
 ```
 
 Audit entries (key and settings changes) live in the database, not stdout. View them at `/logs`.
-```
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add deploy/README.md
-git commit -m "docs: add operations runbook"
