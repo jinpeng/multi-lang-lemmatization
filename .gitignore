@@ -225,3 +225,6 @@ uv.lock
 
 # local runtime state
 /data/
+
+# agent scratch
+.crab/
