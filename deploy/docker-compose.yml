@@ -1,0 +1,37 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/api.Dockerfile
+    environment:
+      LEMMA_MASTER_KEY: ${LEMMA_MASTER_KEY:?must be 32 random hex bytes, see deploy/README.md}
+      LEMMA_SERVICE_TOKEN: ${LEMMA_SERVICE_TOKEN:?must be a long random value}
+      LEMMA_ADMIN_PASSPHRASE_HASH: ${LEMMA_ADMIN_PASSPHRASE_HASH:?run python -m api.cli hash-passphrase}
+      LEMMA_DB_PATH: /data/lemming.db
+      LEMMA_AUTH_ENABLED: "1"
+      LEMMA_REQUIRE_AUTH: "1"
+    volumes:
+      - lemmadata:/data
+    # Deliberately NOT published: only the console reaches the API.
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  console:
+    build:
+      context: ..
+      dockerfile: deploy/console.Dockerfile
+    environment:
+      LEMMA_API_URL: http://api:8000
+      LEMMA_SERVICE_TOKEN: ${LEMMA_SERVICE_TOKEN:?must match the api service}
+      LEMMA_DEMO_KEY: ${LEMMA_DEMO_KEY:-}
+      LEMMA_PUBLIC_API_URL: ${LEMMA_PUBLIC_API_URL:-http://localhost:3000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  lemmadata:
