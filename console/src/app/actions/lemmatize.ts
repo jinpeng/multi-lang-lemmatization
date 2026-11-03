@@ -31,14 +31,15 @@ export async function runLemmatize(
     };
   }
 
-  // Two modes so the demo can show both halves of the contract:
-  // a single word exercises dictionary lookup, a sentence exercises segmentation.
-  const isSingleWord = !/\s/.test(text);
-  const payload = {
-    lang,
-    ...(isSingleWord ? { tokens: [text] } : { text }),
-    ...(isSingleWord && posRaw ? { pos: [posRaw] } : {}),
-  };
+  // Only use the `tokens` path when a POS tag must be attached to one token.
+  // Everything else goes through `text`, because the `tokens` path carries no
+  // source string and therefore no offsets — which would silently disable
+  // highlighting. Never infer "one word" from the absence of whitespace:
+  // Japanese and Korean sentences contain none but are many morphemes.
+  const useTokens = posRaw.length > 0;
+  const payload = useTokens
+    ? { lang, tokens: [text], pos: [posRaw] }
+    : { lang, text };
 
   try {
     const response = await api().lemmatize(key, payload);
@@ -47,7 +48,7 @@ export async function runLemmatize(
       kind: "ok",
       response,
       curl: buildCurl(publicBase, payload),
-      submitted: isSingleWord ? "" : text,
+      submitted: useTokens ? "" : text,
     };
   } catch (error) {
     if (error instanceof ApiError) {
