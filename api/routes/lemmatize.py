@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -23,8 +22,9 @@ async def lemmatize(
     response: Response,
     key: Annotated[ResolvedKey | None, Depends(authenticate)],
 ) -> dict:
-    request_id = f"req_{uuid.uuid4().hex[:20]}"
-    request.state.request_id = request_id
+    # Set by the logging middleware so that auth failures (which happen before
+    # this handler) still carry a correlatable id.
+    request_id = getattr(request.state, "request_id", "-")
     request.state.lang = payload.lang
 
     if key is not None:

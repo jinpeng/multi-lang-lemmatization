@@ -168,3 +168,24 @@ def test_health_stays_open_without_credentials(app_client):
 def test_languages_stays_open_without_credentials(app_client):
     client, _, _ = app_client
     assert client.get("/v1/languages").status_code == 200
+
+
+def test_auth_failure_still_carries_a_request_id(app_client):
+    """A 401 must be correlatable with its log row, so the id is minted by the
+    middleware, not the route (which never runs when auth rejects)."""
+    client, _, _ = app_client
+    resp = client.post("/v1/lemmatize", json={"lang": "de", "tokens": ["x"]})
+    assert resp.status_code == 401
+    rid = resp.json()["error"]["request_id"]
+    assert rid and rid.startswith("req_")
+
+
+def test_successful_call_echoes_request_id_in_header(app_client):
+    client, created, _ = app_client
+    resp = client.post(
+        "/v1/lemmatize",
+        json={"lang": "de", "tokens": ["x"]},
+        headers={"Authorization": f"Bearer {created.key_id}.{created.secret}"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["X-Request-Id"] == resp.json()["request_id"]

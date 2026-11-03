@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -164,6 +165,12 @@ def create_app(
     @app.middleware("http")
     async def _request_log_middleware(request: Request, call_next):
         started = time.perf_counter()
+
+        # Assign the id here, not in the route. Authentication runs as a
+        # dependency before the handler, so a 401 raised by auth would
+        # otherwise carry request_id=null and could not be correlated with its
+        # own log row.
+        request.state.request_id = f"req_{uuid.uuid4().hex[:20]}"
 
         # HMAC verification needs the exact bytes the client sent, and Starlette
         # discards the stream once the body is parsed. Cache it here, before any
