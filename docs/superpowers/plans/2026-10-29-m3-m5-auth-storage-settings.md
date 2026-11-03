@@ -30,7 +30,34 @@ The non-HTTP modules (crypto, schema, key store, HMAC, nonce cache, rate limiter
 
 **Defect found by mutation testing and fixed here:** `timestamp_within_window` had **no unit tests at all**. Replacing its body with `return True` — disabling one of the three replay defences — passed the entire suite, because only an HTTP-level test in Task 7 covered it. Five unit tests were added (accepts now, accepts ±299s skew, rejects stale, rejects far-future, rejects non-numeric); the mutation now fails. Far-future matters specifically: without a two-sided window a timestamp decades ahead stays valid forever.
 
-**Not verified here:** Tasks 7, 7b, 9, 10, 11 (auth dependency wiring, admin routes, CLI, fixtures) need the full app assembled. Their code is complete but was not executed.
+**All tasks were subsequently executed end to end.** 218 tests pass, and a live
+server with `LEMMA_AUTH_ENABLED=1` was driven through ten scenarios: no
+credential, valid Bearer, wrong secret, valid HMAC, replayed nonce, admin
+without tokens, admin session + key listing (asserting no secret leaks),
+settings patch + audit row, diagnostics read-only (PATCH returns 405), and
+request-log shape capture.
+
+**Three more defects were found only by running it, and are fixed in the tasks below:**
+
+1. **HMAC never verified.** `api/auth/deps.py` read `request.state.body_bytes`,
+   but nothing ever wrote it. Every signed request failed `SIGNATURE_INVALID`
+   while Bearer worked, so the unit tests passed and the feature did not. Starlette
+   discards the body stream once parsed, so Task 7b's middleware now caches the
+   raw bytes before routing — and only when `X-Signature` is present, so ordinary
+   traffic is not buffered.
+2. **429 carried no `Retry-After`.** A bare 429 forces blind backoff. The
+   `ApiError` handler now emits it from `details.retry_after`.
+3. **Every error response had `request_id: null`.** Authentication runs as a
+   dependency *before* the route, so the route's id was never assigned on the
+   401/403/429 paths and those rows could not be correlated with their own
+   log entries. The id is now minted in the middleware.
+
+Plus one lint-level correction: `Depends()` in an argument default (B008) became
+`Annotated[..., Depends(...)]`.
+
+> When running the stack by hand, bind a *random* port and trap cleanup. A
+> leftover uvicorn from an earlier run will happily answer on the old port with
+> an old master key, which looks exactly like "auth is broken".
 
 **Dependency versions actually resolved:** sqlalchemy 2.1.6, cryptography 50.0.2, argon2-cffi 25.1.0.
 
@@ -2087,6 +2114,20 @@ that and fall back to the `content-length` header:
     @app.middleware("http")
     async def _request_log_middleware(request: Request, call_next):
         started = time.perf_counter()
+
+        # Assign the id here, not in the route. Authentication runs as a
+        # dependency before the handler, so a 401 raised by auth would
+        # otherwise carry request_id=null and could not be correlated with its
+        # own log row.
+        request.state.request_id = f"req_{uuid.uuid4().hex[:20]}"
+
+        # HMAC verification needs the exact bytes the client sent, and Starlette
+        # discards the stream once the body is parsed. Cache it here, before any
+        # route or dependency reads it, so the auth dependency can re-hash it.
+        # Only when signing: ordinary traffic must not be buffered.
+        if request.headers.get("X-Signature"):
+            request.state.body_bytes = await request.body()
+
         try:
             response = await call_next(request)
         except Exception:
