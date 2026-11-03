@@ -35,16 +35,41 @@ def hash_passphrase(passphrase: str) -> str:
     return _HASHER.hash(passphrase)
 
 
-def verify_passphrase(passphrase: str) -> bool:
+ARGON2_PREFIX = "$argon2"
+
+
+def _stored_hash() -> str:
     stored = os.environ.get("LEMMA_ADMIN_PASSPHRASE_HASH", "")
     if not stored:
         raise ApiError("INTERNAL", 500, "LEMMA_ADMIN_PASSPHRASE_HASH is not configured")
+    # A hash that does not start with "$argon2" is corrupt, not merely wrong.
+    # The usual cause is Docker Compose variable interpolation eating "$argon2id"
+    # and "$v": the value silently becomes "=19=65536,t=3,p=4" and every login
+    # fails as "wrong passphrase", which looks like a credentials problem.
+    # Fail loudly instead.
+    if not stored.startswith(ARGON2_PREFIX):
+        raise ApiError(
+            "INTERNAL",
+            500,
+            "LEMMA_ADMIN_PASSPHRASE_HASH is malformed (does not start with $argon2). "
+            "In a .env file, escape every '$' as '$$'.",
+        )
+    return stored
+
+
+def verify_passphrase(passphrase: str) -> bool:
+    stored = _stored_hash()
     try:
         return _HASHER.verify(stored, passphrase)
     except VerifyMismatchError:
         return False
     except Exception:
         return False
+
+
+def validate_config() -> None:
+    """Called at startup so a broken hash never reaches a login attempt."""
+    _stored_hash()
 
 
 def issue_token(app) -> AdminSession:

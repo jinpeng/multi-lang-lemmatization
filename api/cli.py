@@ -35,10 +35,21 @@ def main(argv: list[str] | None = None) -> int:
     hp = sub.add_parser("hash-passphrase", help="hash an admin passphrase")
     hp.add_argument("passphrase")
 
+    el = sub.add_parser("env-line", help="print a ready-to-paste .env line for a passphrase")
+    el.add_argument("passphrase")
+
     args = parser.parse_args(argv)
 
     if args.command == "hash-passphrase":
         print(hash_passphrase(args.passphrase))
+        return 0
+
+    if args.command == "env-line":
+        # Docker Compose interpolates '$' in .env values, and an argon2 hash is
+        # full of them. Doubling is the documented escape; doing it here means
+        # an operator cannot get it wrong by hand.
+        hashed = hash_passphrase(args.passphrase)
+        print(f"LEMMA_ADMIN_PASSPHRASE_HASH={hashed.replace('$', '$$')}")
         return 0
 
     url = default_url()

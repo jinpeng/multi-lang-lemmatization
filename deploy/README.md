@@ -4,7 +4,9 @@
 
 ```bash
 export LEMMA_MASTER_KEY=$(python -c 'import secrets; print(secrets.token_hex(32))')
-export LEMMA_ADMIN_PASSPHRASE_HASH=$(python -m api.cli hash-passphrase 'your passphrase')
+# Write the escaped line straight into .env -- do not hand-edit the hash:
+# compose interpolates '$', and argon2 hashes are full of them.
+python -m api.cli env-line 'your passphrase' >> .env
 
 docker compose up -d --build
 docker compose exec api python -m api.cli create-key --name console-demo --allow-hmac
@@ -21,6 +23,14 @@ Open http://localhost:3000, sign in with the passphrase.
 | `LEMMA_MASTER_KEY` | Every stored API secret becomes unverifiable. All keys must be reissued. |
 | `LEMMA_SERVICE_TOKEN` | Console cannot reach the API. Rotate it in both services together. |
 | `LEMMA_ADMIN_PASSPHRASE_HASH` | No admin access. Regenerate and restart `api`. |
+
+> **The `$` trap.** Docker Compose interpolates `$` inside `.env`, and an argon2
+> hash looks like `$argon2id$v=19$m=65536,t=3,p=4$salt$hash`. Written literally
+> it silently becomes `=19=65536,t=3,p=4` and *every* login fails with "wrong
+> passphrase" — which reads like a credentials problem, not a config one.
+> Always generate the line with `python -m api.cli env-line '<passphrase>'`,
+> which doubles the `$` for you. The API also refuses to start if the value does
+> not begin with `$argon2`, so this cannot reach production silently.
 
 **Back up `LEMMA_MASTER_KEY` outside this host.** It is not in the database, and without it the encrypted secrets in `lemming.db` are unrecoverable by design.
 

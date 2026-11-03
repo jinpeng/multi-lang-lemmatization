@@ -6,7 +6,12 @@ services:
     environment:
       LEMMA_MASTER_KEY: ${LEMMA_MASTER_KEY:?must be 32 random hex bytes, see deploy/README.md}
       LEMMA_SERVICE_TOKEN: ${LEMMA_SERVICE_TOKEN:?must be a long random value}
-      LEMMA_ADMIN_PASSPHRASE_HASH: ${LEMMA_ADMIN_PASSPHRASE_HASH:?run python -m api.cli hash-passphrase}
+      # NOTE: compose interpolates $ in .env values. An argon2 hash contains
+      # several $ signs ($argon2id$v=19$m=...), so they MUST be written as $$
+      # in .env. Run `python -m api.cli env-line` to get a correctly escaped
+      # line; the API also refuses to start if the value does not begin with
+      # $argon2.
+      LEMMA_ADMIN_PASSPHRASE_HASH: ${LEMMA_ADMIN_PASSPHRASE_HASH:?run python -m api.cli hash-passphrase, then escape $ as $$}
       LEMMA_DB_PATH: /data/lemming.db
       LEMMA_AUTH_ENABLED: "1"
       LEMMA_REQUIRE_AUTH: "1"

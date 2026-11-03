@@ -12,13 +12,21 @@ RUN pip install --upgrade pip && pip install \
       "sudachipy==0.7.0" "sudachidict_core==20261015" \
       "kiwipiepy==0.24.1" "kiwipiepy_model==0.24.0"
 
-COPY api ./api
-
 # Refuse to run insecurely: auth must be on in any image built from this file.
 ENV LEMMA_AUTH_ENABLED=1 LEMMA_REQUIRE_AUTH=1
 
+# Create the user first, then copy with the right owner. COPY defaults to
+# root:root, and the service runs unprivileged, so without --chown it cannot
+# read its own source: PermissionError on /app/api/main.py.
 RUN useradd --create-home --uid 10001 lemma && mkdir -p /data && chown lemma /data
+
+COPY --chown=lemma:lemma api ./api
+
 USER lemma
+# The volume mount point and the default DB location must agree. Without this,
+# db.default_url() falls back to "./data" inside /app, which the unprivileged
+# user cannot create, and the container dies at import time.
+ENV LEMMA_DB_PATH=/data/lemming.db
 VOLUME ["/data"]
 EXPOSE 8000
 

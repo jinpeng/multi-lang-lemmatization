@@ -128,6 +128,12 @@ def create_app(
     if not auth_enabled and os.environ.get("LEMMA_REQUIRE_AUTH") == "1":
         raise RuntimeError("LEMMA_REQUIRE_AUTH=1 but authentication is disabled; refusing to start")
     app.state.auth_enabled = auth_enabled
+    if auth_enabled:
+        # Fail at boot rather than at the first login attempt: a mangled
+        # argon2 hash otherwise looks like "everyone's password is wrong".
+        from api.auth.admin import validate_config
+
+        validate_config()
 
     @app.exception_handler(ApiError)
     async def _api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
