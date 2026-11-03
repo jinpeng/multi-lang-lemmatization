@@ -1,4 +1,5 @@
 import pytest
+from cryptography.exceptions import InvalidTag
 
 from api.crypto import (
     constant_time_compare,
@@ -20,21 +21,21 @@ def test_seal_open_roundtrip():
 def test_sealed_plaintext_is_not_recoverable_without_master_key():
     secret = seal_secret("ls_hello", "key_abc", MASTER)
     wrong = b"1" * 32
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         open_secret(secret, "key_abc", wrong)
 
 
 def test_aad_binds_ciphertext_to_key_id():
     """A sealed secret must not be replayable under a different key_id."""
     blob = seal_secret("ls_hello", "key_abc", MASTER)
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         open_secret(blob, "key_DIFFERENT", MASTER)
 
 
 def test_tampered_ciphertext_is_rejected():
     blob = bytearray(seal_secret("ls_hello", "key_abc", MASTER))
     blob[-1] ^= 0xFF
-    with pytest.raises(Exception):
+    with pytest.raises(InvalidTag):
         open_secret(bytes(blob), "key_abc", MASTER)
 
 

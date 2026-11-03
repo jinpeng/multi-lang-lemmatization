@@ -4,19 +4,35 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request, Response
 
+from api.auth.deps import authenticate, require_lang
 from api.errors import ApiError
+from api.models import ResolvedKey
 from api.schemas import LemmatizeRequest, normalize_pos
 
 router = APIRouter()
 
 
 @router.post("/v1/lemmatize")
-def lemmatize(payload: LemmatizeRequest, request: Request) -> dict:
+async def lemmatize(
+    payload: LemmatizeRequest,
+    request: Request,
+    response: Response,
+    key: Annotated[ResolvedKey | None, Depends(authenticate)],
+) -> dict:
     request_id = f"req_{uuid.uuid4().hex[:20]}"
     request.state.request_id = request_id
+    request.state.lang = payload.lang
+
+    if key is not None:
+        require_lang(key, payload.lang)
+        rate = getattr(request.state, "rate", None)
+        if rate is not None:
+            response.headers["X-RateLimit-Limit"] = str(rate.limit)
+            response.headers["X-RateLimit-Remaining"] = str(rate.remaining)
 
     registry = request.app.state.registry
     entry = registry.get(payload.lang)
@@ -47,6 +63,7 @@ def lemmatize(payload: LemmatizeRequest, request: Request) -> dict:
         )
 
     token_count = len(payload.tokens) if payload.tokens is not None else None
+    request.state.n_tokens = token_count
     try:
         pos_list = normalize_pos(payload.pos, token_count)
     except ValueError as exc:

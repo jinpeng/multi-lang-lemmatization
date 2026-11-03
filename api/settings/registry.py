@@ -30,9 +30,7 @@ EDITABLE: dict[str, Spec] = {
     "langs.fr.greedy": Spec(kind="bool", hot=True, default=False),
     "langs.es.greedy": Spec(kind="bool", hot=True, default=False),
     "langs.ja.split_mode": Spec(kind="enum", hot=True, default="C", values=("A", "B", "C")),
-    "langs.ko.model_type": Spec(
-        kind="enum", hot=False, default="cong", values=("cong", "knlm")
-    ),
+    "langs.ko.model_type": Spec(kind="enum", hot=False, default="cong", values=("cong", "knlm")),
     "ratelimit.default_rpm": Spec(kind="int", hot=True, default=600, min=1, max=100_000),
     "ratelimit.burst": Spec(kind="int", hot=True, default=60, min=1, max=10_000),
     "request.max_tokens": Spec(kind="int", hot=True, default=5000, min=1, max=100_000),

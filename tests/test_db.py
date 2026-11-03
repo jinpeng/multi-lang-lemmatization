@@ -6,10 +6,7 @@ def test_init_db_creates_all_tables(tmp_path):
     init_db(f"sqlite:///{db}")
     with session(f"sqlite:///{db}") as conn:
         names = {
-            r[0]
-            for r in conn.exec_driver_sql(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
+            r[0] for r in conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'")
         }
     assert {"api_keys", "settings", "audit_log", "request_log"} <= names
 

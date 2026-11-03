@@ -61,9 +61,9 @@ def derive_signing_key(secret: str) -> bytes:
     If the raw secret were used for both, a leaked `Authorization: Bearer`
     header would also hand over everything needed to forge HMAC signatures.
     """
-    return HKDF(
-        algorithm=hashes.SHA256(), length=32, salt=None, info=b"lemma-hmac-v1"
-    ).derive(secret.encode())
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"lemma-hmac-v1").derive(
+        secret.encode()
+    )
 
 
 def constant_time_compare(a: str, b: str) -> bool:

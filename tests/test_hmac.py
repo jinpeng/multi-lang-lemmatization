@@ -30,9 +30,7 @@ def test_sign_then_verify_roundtrip():
 def test_verify_rejects_changed_body():
     body = b'{"lang":"de"}'
     sig = sign(SECRET, "POST", "/v1/lemmatize", "1700000000", "n1", body)
-    assert not verify(
-        SECRET, "POST", "/v1/lemmatize", "1700000000", "n1", b'{"lang":"fr"}', sig
-    )
+    assert not verify(SECRET, "POST", "/v1/lemmatize", "1700000000", "n1", b'{"lang":"fr"}', sig)
 
 
 def test_verify_rejects_changed_path():

@@ -100,9 +100,7 @@ def _to_resolved(row) -> ResolvedKey:
     )
 
 
-def verify_bearer(
-    url: str, key_id: str, secret: str, master_key: bytes
-) -> ResolvedKey | None:
+def verify_bearer(url: str, key_id: str, secret: str, master_key: bytes) -> ResolvedKey | None:
     row = _row(url, key_id)
     if row is None or not _usable(row, _now()):
         return None
@@ -153,16 +151,12 @@ def _touch(url: str, key_id: str) -> None:
         )
 
 
-def rotate(
-    url: str, key_id: str, *, master_key: bytes, grace_hours: int = 24
-) -> CreatedKey:
+def rotate(url: str, key_id: str, *, master_key: bytes, grace_hours: int = 24) -> CreatedKey:
     row = _row(url, key_id)
     if row is None:
         raise KeyError(key_id)
     secret = generate_secret()
-    expires = (datetime.now(UTC) + timedelta(hours=grace_hours)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    expires = (datetime.now(UTC) + timedelta(hours=grace_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     with session(url) as conn:
         conn.exec_driver_sql(
             """UPDATE api_keys

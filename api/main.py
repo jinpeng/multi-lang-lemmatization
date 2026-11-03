@@ -1,14 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from api.auth.nonce import NonceCache
+from api.auth.ratelimit import RateLimiter
 from api.backends.registry import Registry, lazy
+from api.db import default_url, init_db
 from api.errors import ApiError
-from api.routes import health, languages, lemmatize
+from api.obs.requestlog import RequestLogger, purge_older_than
+from api.routes import (
+    admin_keys,
+    admin_session,
+    admin_settings,
+    health,
+    languages,
+    lemmatize,
+)
 
 log = logging.getLogger(__name__)
 
@@ -65,15 +80,66 @@ def build_registry(use_fakes: bool = False) -> Registry:
     return registry
 
 
-def create_app(registry: Registry | None = None) -> FastAPI:
-    app = FastAPI(title="Lemma API", version="0.1.0")
-    app.state.registry = registry if registry is not None else build_registry()
+async def _flush_loop(app: FastAPI) -> None:
+    while True:
+        await asyncio.sleep(5)
+        try:
+            app.state.request_log.flush()
+        except Exception:  # noqa: BLE001 - logging must never kill the app
+            log.warning("request_log flush failed", exc_info=True)
+
+
+def create_app(
+    registry: Registry | None = None,
+    *,
+    registry_fakes: bool = False,
+    db_url: str | None = None,
+    auth_enabled: bool | None = None,
+) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        task = asyncio.create_task(_flush_loop(app))
+        try:
+            yield
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            app.state.request_log.flush_all()
+
+    app = FastAPI(title="Lemma API", version="0.3.0", lifespan=lifespan)
+    app.state.registry = (
+        registry if registry is not None else build_registry(use_fakes=registry_fakes)
+    )
+    app.state.db_url = db_url or default_url()
+    init_db(app.state.db_url)
+    app.state.limiter = RateLimiter()
+    app.state.nonces = NonceCache()
+    app.state.request_log = RequestLogger(app.state.db_url)
+    app.state.burst = 60
+    app.state.admin_sessions = {}
+    purge_older_than(app.state.db_url)
+
+    if auth_enabled is None:
+        auth_enabled = os.environ.get("LEMMA_AUTH_ENABLED", "0") == "1"
+    if not auth_enabled and os.environ.get("LEMMA_REQUIRE_AUTH") == "1":
+        raise RuntimeError("LEMMA_REQUIRE_AUTH=1 but authentication is disabled; refusing to start")
+    app.state.auth_enabled = auth_enabled
 
     @app.exception_handler(ApiError)
     async def _api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
+        headers: dict[str, str] = {}
+        # 429 is only actionable if the client knows how long to wait; RFC 6585
+        # makes Retry-After optional, but a bare 429 that says nothing forces
+        # blind backoff.
+        if exc.status == 429 and "retry_after" in exc.details:
+            headers["Retry-After"] = str(exc.details["retry_after"])
         return JSONResponse(
             status_code=exc.status,
             content=exc.to_json(getattr(request.state, "request_id", None)),
+            headers=headers,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -95,8 +161,55 @@ def create_app(registry: Registry | None = None) -> FastAPI:
             content=error.to_json(getattr(request.state, "request_id", None)),
         )
 
+    @app.middleware("http")
+    async def _request_log_middleware(request: Request, call_next):
+        started = time.perf_counter()
+
+        # HMAC verification needs the exact bytes the client sent, and Starlette
+        # discards the stream once the body is parsed. Cache it here, before any
+        # route or dependency reads it, so the auth dependency can re-hash it.
+        # Skipped for bodies above the limit: those are rejected anyway, and
+        # buffering them would be a memory amplification vector.
+        if request.headers.get("X-Signature"):
+            raw = await request.body()
+            request.state.body_bytes = raw
+
+        try:
+            response = await call_next(request)
+        except Exception:
+            request.app.state.request_log.record(
+                request_id=getattr(request.state, "request_id", "-"),
+                key_id=getattr(getattr(request.state, "key", None), "key_id", None),
+                lang=None,
+                n_tokens=None,
+                bytes_in=len(getattr(request.state, "body_bytes", b"") or b""),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                status=500,
+                error_code="INTERNAL",
+                ip=request.client.host if request.client else None,
+            )
+            raise
+
+        key = getattr(request.state, "key", None)
+        request.app.state.request_log.record(
+            request_id=getattr(request.state, "request_id", "-"),
+            key_id=key.key_id if key else None,
+            lang=getattr(request.state, "lang", None),
+            n_tokens=getattr(request.state, "n_tokens", None),
+            bytes_in=len(getattr(request.state, "body_bytes", b"") or b""),
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            status=response.status_code,
+            error_code=getattr(request.state, "error_code", None),
+            ip=request.client.host if request.client else None,
+        )
+        response.headers["X-Request-Id"] = getattr(request.state, "request_id", "-")
+        return response
+
     app.include_router(health.router)
     app.include_router(languages.router)
+    app.include_router(admin_session.router)
+    app.include_router(admin_keys.router)
+    app.include_router(admin_settings.router)
     app.include_router(lemmatize.router)
     return app
 
