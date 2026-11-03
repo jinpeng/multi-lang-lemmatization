@@ -109,3 +109,38 @@ def test_diagnostics_is_read_only(client):
     assert "master_key" in body
     assert body["master_key"] == "set"
     assert client.patch("/admin/diagnostics", headers=headers).status_code == 405
+
+
+def test_malformed_hash_is_rejected_loudly(client, monkeypatch):
+    """A '$'-interpolated hash must fail as corrupt, not as a wrong password."""
+    from api.auth.admin import verify_passphrase
+    from api.errors import ApiError
+
+    monkeypatch.setenv("LEMMA_ADMIN_PASSPHRASE_HASH", "=19=65536,t=3,p=4")
+    with pytest.raises(ApiError, match="malformed"):
+        verify_passphrase("anything")
+
+
+def test_startup_refuses_a_malformed_hash(tmp_path, monkeypatch):
+    from api.db import init_db
+    from api.main import create_app
+
+    url = f"sqlite:///{tmp_path / 't.db'}"
+    init_db(url)
+    monkeypatch.setenv("LEMMA_MASTER_KEY", MASTER.hex())
+    monkeypatch.setenv("LEMMA_ADMIN_PASSPHRASE_HASH", "=19=broken")
+    with pytest.raises(Exception, match="malformed"):
+        create_app(registry_fakes=True, db_url=url, auth_enabled=True)
+
+
+def test_headless_deployment_without_admin_hash_is_allowed(tmp_path, monkeypatch):
+    """API-key auth must not require an admin passphrase (no console case)."""
+    from api.db import init_db
+    from api.main import create_app
+
+    url = f"sqlite:///{tmp_path / 't.db'}"
+    init_db(url)
+    monkeypatch.setenv("LEMMA_MASTER_KEY", MASTER.hex())
+    monkeypatch.delenv("LEMMA_ADMIN_PASSPHRASE_HASH", raising=False)
+    app = create_app(registry_fakes=True, db_url=url, auth_enabled=True)
+    assert app.state.auth_enabled is True

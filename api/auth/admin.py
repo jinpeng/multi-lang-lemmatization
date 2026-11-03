@@ -68,8 +68,15 @@ def verify_passphrase(passphrase: str) -> bool:
 
 
 def validate_config() -> None:
-    """Called at startup so a broken hash never reaches a login attempt."""
-    _stored_hash()
+    """Called at startup so a broken hash never reaches a login attempt.
+
+    An absent hash is allowed: API-key authentication works without a console,
+    so a headless deployment has no reason to configure an admin passphrase.
+    A hash that is *present but malformed* is always a configuration error.
+    """
+    stored = os.environ.get("LEMMA_ADMIN_PASSPHRASE_HASH", "")
+    if stored:
+        _stored_hash()
 
 
 def issue_token(app) -> AdminSession:
