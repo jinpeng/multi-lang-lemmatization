@@ -8,7 +8,7 @@ ignored — and the resulting error names a missing variable, not the wrong path
 
 ```bash
 cd deploy
-cp .env_example .env
+cp .env.example .env
 
 # Generate the three required values; do not invent them.
 echo "LEMMA_MASTER_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')" >> .env
@@ -29,7 +29,7 @@ docker compose up -d console
 
 Open http://localhost:3000 and sign in with the passphrase.
 
-`.env_example` documents every variable, including the ones the image sets
+`.env.example` documents every variable, including the ones the image sets
 itself and that must not be overridden.
 
 ## Secrets you must not lose
