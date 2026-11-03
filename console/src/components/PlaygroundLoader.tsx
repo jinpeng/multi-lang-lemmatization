@@ -1,8 +1,11 @@
+import { connection } from "next/server";
 import { api } from "@/lib/server";
 import { Playground } from "@/components/Playground";
 import type { LanguageEntry } from "@/lib/types";
 
 export async function PlaygroundLoader() {
+  // Live API data: must be read per request, never prerendered.
+  await connection();
   let languages: LanguageEntry[] = [];
   let loadError: string | undefined;
   try {
