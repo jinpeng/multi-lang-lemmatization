@@ -53,21 +53,26 @@ If `LEMMA_MASTER_KEY` is compromised, rotation alone is insufficient: every key 
 
 ## Memory: the number that actually bites
 
-Every `api` worker is its own process and loads **all seven** backends. Measured
-resident set per worker:
+Every `api` worker is its own process and loads **all seven** backends.
+Measured inside the running container (`/proc/<pid>/status VmRSS`):
 
-| backend | RSS |
+| process | steady state |
 |---|---|
-| ko (kiwipiepy) | ~357 MB |
-| ja (sudachipy + core dict) | ~82 MB |
-| ru (pymorphy3) | ~36 MB |
-| en (lemminflect) | ~16 MB |
-| de / fr / es (simplemma) | ~7 MB each |
-| interpreter + numpy | remainder |
-| **total per worker** | **~820 MB** |
+| worker A | 447 MB |
+| worker B | 569 MB |
+| parent | 26 MB |
+| **`LEMMA_WORKERS=2` total** | **~1.0 GB** |
 
-`LEMMA_WORKERS` defaults to **2** (~1.7 GB). Set it to 4 only on a host with
-4 GB free. Dropping `ko` is the single biggest lever if you need to shrink this.
+Peak during startup is higher (~820 MB for a single process) because the
+dictionaries are decompressed while loading. Size the host against the peak,
+not the steady state, or the container will be OOM-killed during boot.
+
+Backends by weight, per worker: `ko` (kiwipiepy) ~357 MB, `ja` (sudachipy +
+core dict) ~82 MB, `ru` ~36 MB, `en` ~16 MB, `de`/`fr`/`es` ~7 MB each.
+
+`LEMMA_WORKERS` defaults to **2**. Raising it multiplies the above: 4 workers
+is roughly 2 GB steady / ~3.3 GB peak. Dropping `ko` is the single biggest
+lever if you need to shrink this.
 
 ## Rate limiting and single-instance assumptions
 
