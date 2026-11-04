@@ -87,6 +87,32 @@ def test_hmac_replay_is_rejected(app_client):
     assert second.json()["error"]["code"] == "NONCE_REPLAYED"
 
 
+def test_unauthenticated_hmac_attempt_does_not_touch_the_nonce_store(app_client):
+    """The nonce table is a write, so it must be unreachable without credentials.
+
+    Timestamp and nonce used to be checked before the signature, which was
+    harmless against a bounded in-memory dict. Once nonces moved to SQLite that
+    ordering let anyone append a row per request just by sending X-Signature and
+    a current X-Timestamp, with no key and no valid signature at all.
+    """
+    client, _, url = app_client
+    ts = str(int(time.time()))
+    for i in range(5):
+        resp = client.post(
+            "/v1/lemmatize",
+            content=b'{"lang":"de","tokens":["x"]}',
+            headers={
+                "content-type": "application/json",
+                "X-Api-Key": "no-such-key",
+                "X-Timestamp": ts,
+                "X-Nonce": f"junk-{i}",
+                "X-Signature": "not-a-signature",
+            },
+        )
+        assert resp.status_code == 401
+    assert client.app.state.nonces.size() == 0
+
+
 def test_hmac_stale_timestamp_is_rejected(app_client):
     client, created, _ = app_client
     body = b'{"lang":"de","tokens":["x"]}'

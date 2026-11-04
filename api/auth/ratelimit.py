@@ -1,7 +1,10 @@
 """Per-key token bucket.
 
-In-memory, like the nonce cache, and for the same single-instance reason. The
-bucket is keyed by key_id, so one abusive tenant cannot starve another.
+In-memory, unlike the nonce cache (which is shared through SQLite because
+replay protection must hold across workers). Each `--workers` process keeps its
+own buckets, so the effective limit is roughly `rpm x workers`; a replica-per-
+process cache would leave the same gap. The bucket is keyed by key_id, so one
+abusive tenant cannot starve another.
 """
 
 from __future__ import annotations

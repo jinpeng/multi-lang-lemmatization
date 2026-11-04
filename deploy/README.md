@@ -92,7 +92,17 @@ lever if you need to shrink this.
 
 ## Rate limiting and single-instance assumptions
 
-The nonce cache and rate-limit buckets are **in-process**. Running more than one `api` replica breaks HMAC replay protection (a nonce consumed on replica A is unknown to B). Scale `--workers` only; do not scale replicas without moving both caches to a shared store.
+HMAC replay protection is **shared**: consumed nonces live in the `hmac_nonces`
+table of `lemming.db`, claimed with a single atomic `INSERT OR IGNORE`, so a
+nonce replayed against a different worker or replica is still rejected. This is
+the one piece of request state that must be correct across processes, and SQLite
+already provides it.
+
+Rate-limit buckets are still **in-process and per worker**. With `LEMMA_WORKERS=2`
+the effective ceiling for a key is roughly twice its configured `rate_limit_rpm`,
+and it moves further if you add replicas. That is a throttling-accuracy gap, not
+a security one: replay protection and key verification are unaffected. Fix it
+before relying on rate limits for billing or abuse containment at scale.
 
 ## Health
 

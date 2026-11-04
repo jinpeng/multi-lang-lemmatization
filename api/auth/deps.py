@@ -1,8 +1,15 @@
 """The single place a request becomes an authenticated key.
 
-Order matters. Timestamp and nonce are checked BEFORE the signature so a
-replayed request is rejected without an expensive decrypt, and a stale request
-never reaches key lookup at all.
+Order matters. Timestamp is checked before anything touches the database, and
+the nonce is consumed only *after* the signature verifies, so an unauthenticated
+caller can never write rows to the nonce store. That ordering was free while the
+nonce cache was a dict; now that it is a SQLite table it is required, because a
+request with no valid key and a garbage signature would otherwise add a row per
+attempt.
+
+The cost is that a replayed request pays one secret decrypt before being
+rejected. That is a symmetric AEAD open, not a password hash, so it is cheap
+enough to sit on the rejection path.
 """
 
 from __future__ import annotations
@@ -106,9 +113,6 @@ def _authenticate_hmac(request: Request, url: str, secret_key: bytes) -> Resolve
             "X-Timestamp is outside the allowed window",
         )
 
-    if not request.app.state.nonces.consume(nonce):
-        raise ApiError("NONCE_REPLAYED", 401, "X-Nonce has already been used")
-
     resolved = keys.resolve_active(url, key_id)
     if resolved is None:
         raise ApiError("UNAUTHORIZED", 401, "invalid key")
@@ -123,6 +127,11 @@ def _authenticate_hmac(request: Request, url: str, secret_key: bytes) -> Resolve
     body = getattr(request.state, "body_bytes", b"")
     if not verify_hmac(secret, request.method, request.url.path, timestamp, nonce, body, signature):
         raise ApiError("SIGNATURE_INVALID", 401, "HMAC signature does not match")
+
+    # Last, and only for a request proven authentic: this is the only write on
+    # an HMAC request, so it must not be reachable without valid credentials.
+    if not request.app.state.nonces.consume(nonce):
+        raise ApiError("NONCE_REPLAYED", 401, "X-Nonce has already been used")
 
     return resolved
 

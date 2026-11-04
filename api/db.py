@@ -68,8 +68,14 @@ CREATE TABLE IF NOT EXISTS request_log (
   ip         TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at DESC);
-CREATE INDEX IF NOT EXISTS idx_req_at   ON request_log(at DESC);
+CREATE TABLE IF NOT EXISTS hmac_nonces (
+  nonce   TEXT PRIMARY KEY,
+  seen_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_at  ON audit_log(at DESC);
+CREATE INDEX IF NOT EXISTS idx_nonce_age ON hmac_nonces(seen_at);
+CREATE INDEX IF NOT EXISTS idx_req_at    ON request_log(at DESC);
 """
 
 _ENGINES: dict[str, Engine] = {}

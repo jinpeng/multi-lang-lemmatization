@@ -1,3 +1,7 @@
+import os
+import subprocess
+import sys
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -144,3 +148,76 @@ def test_headless_deployment_without_admin_hash_is_allowed(tmp_path, monkeypatch
     monkeypatch.delenv("LEMMA_ADMIN_PASSPHRASE_HASH", raising=False)
     app = create_app(registry_fakes=True, db_url=url, auth_enabled=True)
     assert app.state.auth_enabled is True
+
+
+def test_admin_token_is_stateless_across_processes(monkeypatch):
+    """A token must verify from any worker, not just the one that issued it.
+
+    Regression: tokens lived in a per-process dict, so under --workers 2 a login
+    on worker A was rejected by worker B -- roughly 1 request in 3 failed.
+    Verified in a real second interpreter: an in-process check would pass even
+    for a dict-backed store.
+    """
+    from api.auth.admin import issue_token
+
+    monkeypatch.setenv("LEMMA_MASTER_KEY", MASTER.hex())
+    token = issue_token().token
+
+    probe = (
+        "import sys; from api.auth.admin import _valid_admin_token; "
+        "sys.exit(0 if _valid_admin_token(sys.argv[1]) else 1)"
+    )
+    other_worker = subprocess.run(
+        [sys.executable, "-c", probe, token],
+        env={**os.environ, "LEMMA_MASTER_KEY": MASTER.hex()},
+        capture_output=True,
+        check=False,
+    )
+    assert other_worker.returncode == 0, other_worker.stderr.decode()
+
+
+def test_forged_admin_token_is_rejected(monkeypatch):
+    from api.auth.admin import _valid_admin_token, issue_token
+
+    monkeypatch.setenv("LEMMA_MASTER_KEY", MASTER.hex())
+    token = issue_token().token
+    expiry, nonce, sig = token.split(".")
+    # Extend the expiry without re-signing: signature no longer matches.
+    assert _valid_admin_token(f"{int(expiry) + 999999}.{nonce}.{sig}") is False
+
+
+def test_admin_token_from_a_different_master_key_is_rejected(monkeypatch):
+    from api.auth.admin import _valid_admin_token, issue_token
+
+    monkeypatch.setenv("LEMMA_MASTER_KEY", MASTER.hex())
+    token = issue_token().token
+    monkeypatch.setenv("LEMMA_MASTER_KEY", (b"1" * 32).hex())
+    assert _valid_admin_token(token) is False
+
+
+def test_expired_admin_token_is_rejected(monkeypatch):
+    from datetime import UTC, datetime
+
+    from api.auth import admin as admin_mod
+
+    monkeypatch.setenv("LEMMA_MASTER_KEY", MASTER.hex())
+    past = int(datetime.now(UTC).timestamp()) - 10
+    payload = f"{past}.nonce"
+    token = f"{payload}.{admin_mod._sign(payload)}"
+    assert admin_mod._valid_admin_token(token) is False
+
+
+def test_non_ascii_admin_token_is_rejected_not_crashed(monkeypatch):
+    """A latin-1 header byte must yield 401, not an uncaught TypeError.
+
+    ASGI decodes header bytes as latin-1, so X-Admin-Token can arrive holding
+    non-ASCII str. hmac.compare_digest raises TypeError on those, which escaped
+    as a 500 from a route whose whole job is to answer 401.
+    """
+    from api.auth.admin import _valid_admin_token, issue_token
+
+    monkeypatch.setenv("LEMMA_MASTER_KEY", MASTER.hex())
+    token = issue_token().token
+    expiry, nonce, sig = token.split(".")
+    assert _valid_admin_token(f"{expiry}.{nonce}.\xe4") is False
+    assert _valid_admin_token(f"{expiry}.{nonce}.\u00ff\u00fe") is False

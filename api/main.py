@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from api.auth.nonce import NonceCache
+from api.auth.nonce import SqliteNonceCache
 from api.auth.ratelimit import RateLimiter
 from api.backends.registry import Registry, lazy
 from api.db import default_url, init_db
@@ -117,10 +117,9 @@ def create_app(
     app.state.db_url = db_url or default_url()
     init_db(app.state.db_url)
     app.state.limiter = RateLimiter()
-    app.state.nonces = NonceCache()
+    app.state.nonces = SqliteNonceCache(app.state.db_url)
     app.state.request_log = RequestLogger(app.state.db_url)
     app.state.burst = 60
-    app.state.admin_sessions = {}
     purge_older_than(app.state.db_url)
 
     if auth_enabled is None:

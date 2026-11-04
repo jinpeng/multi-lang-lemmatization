@@ -6,10 +6,19 @@ Two factors are required on every admin route:
 
 Requiring both means a stolen admin token is useless without the service token,
 and the service token never leaves the server-to-server hop.
+
+Admin tokens are STATELESS: `<expiry>.<nonce>.<hmac>`, signed with a key derived
+from LEMMA_MASTER_KEY. They were originally held in a per-process dict, which
+silently broke under `--workers 2`: a login stored the token in worker A's
+memory, and any later request routed to worker B was rejected as invalid. No
+shared store is needed if the token carries its own proof.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac as hmac_mod
 import os
 import secrets
 from dataclasses import dataclass
@@ -23,6 +32,7 @@ from api.errors import ApiError
 
 ADMIN_TTL_SECONDS = 7200
 _HASHER = PasswordHasher()
+ARGON2_PREFIX = "$argon2"
 
 
 @dataclass
@@ -33,9 +43,6 @@ class AdminSession:
 
 def hash_passphrase(passphrase: str) -> str:
     return _HASHER.hash(passphrase)
-
-
-ARGON2_PREFIX = "$argon2"
 
 
 def _stored_hash() -> str:
@@ -79,21 +86,55 @@ def validate_config() -> None:
         _stored_hash()
 
 
-def issue_token(app) -> AdminSession:
-    token = secrets.token_urlsafe(32)
-    expires = datetime.now(UTC).timestamp() + ADMIN_TTL_SECONDS
-    app.state.admin_sessions[token] = expires
-    return AdminSession(token=token, expires_at=expires)
+def _signing_key() -> bytes:
+    """Derive an admin-token key from the master key.
+
+    Separate from the API-key HMAC derivation so that a token issued for one
+    purpose can never validate for the other.
+    """
+    raw = os.environ.get("LEMMA_MASTER_KEY", "")
+    if not raw:
+        raise ApiError("INTERNAL", 500, "LEMMA_MASTER_KEY is not configured")
+    try:
+        master = bytes.fromhex(raw)
+    except ValueError as exc:
+        raise ApiError("INTERNAL", 500, "LEMMA_MASTER_KEY must be 32 hex bytes") from exc
+    return hmac_mod.new(master, b"lemma-admin-token-v1", hashlib.sha256).digest()
 
 
-def _valid_admin_token(app, token: str) -> bool:
-    expires = app.state.admin_sessions.get(token)
-    if expires is None:
+def _sign(payload: str) -> str:
+    digest = hmac_mod.new(_signing_key(), payload.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def issue_token() -> AdminSession:
+    expires = int(datetime.now(UTC).timestamp()) + ADMIN_TTL_SECONDS
+    payload = f"{expires}.{secrets.token_urlsafe(16)}"
+    token = f"{payload}.{_sign(payload)}"
+    return AdminSession(token=token, expires_at=float(expires))
+
+
+def _valid_admin_token(token: str) -> bool:
+    parts = token.split(".")
+    if len(parts) != 3:
         return False
-    if expires < datetime.now(UTC).timestamp():
-        app.state.admin_sessions.pop(token, None)
+    expires_raw, _nonce, signature = parts
+    payload = f"{expires_raw}.{_nonce}"
+
+    # compare_digest raises TypeError on non-ASCII str, and an ASGI header is
+    # latin-1 decoded, so a byte such as 0xE4 would turn a bad token into a 500
+    # instead of a 401. Compare the ASCII bytes explicitly.
+    try:
+        presented = signature.encode("ascii")
+    except UnicodeEncodeError:
         return False
-    return True
+    if not hmac_mod.compare_digest(presented, _sign(payload).encode("ascii")):
+        return False
+    try:
+        expires = int(expires_raw)
+    except ValueError:
+        return False
+    return expires >= datetime.now(UTC).timestamp()
 
 
 async def require_admin(request: Request) -> str:
@@ -103,7 +144,7 @@ async def require_admin(request: Request) -> str:
         raise ApiError("UNAUTHORIZED", 401, "invalid or missing X-Service-Token")
 
     admin_token = request.headers.get("X-Admin-Token", "")
-    if not _valid_admin_token(request.app, admin_token):
+    if not _valid_admin_token(admin_token):
         raise ApiError("UNAUTHORIZED", 401, "invalid or expired X-Admin-Token")
 
     return "admin"
