@@ -30,7 +30,7 @@ class SudachiBackend(BaseBackend):
     )
 
     def __init__(self) -> None:
-        self._tokenizer = dictionary.Dictionary(dict_type="core").create()
+        self._tokenizer = dictionary.Dictionary(dict="core").tokenizer()
         self.version = md.version("sudachipy")
         try:
             self.dictionary_id = md.version("sudachidict_core")
