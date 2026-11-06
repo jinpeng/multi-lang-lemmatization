@@ -93,6 +93,28 @@ uv run ruff check . && uv run ruff format --check .
 
 测试分两层：`tests/backends/` 是各语言适配器的专项测试（形态还原、offsets 契约、选项覆盖）；`tests/test_golden.py` 是经真实 API 的跨语言黄金用例（`was→be`、`Häuser→Haus`、`食べました→食べる`、`먹었습니다→먹다` …）。
 
+## 准确率评测
+
+```bash
+./scripts/download_ud.sh     # 下载 UD 测试集到 data/ud/
+uv run python -m scripts.evaluate_ud          # 7 语言报告
+uv run python -m scripts.evaluate_ud --json   # 机器可读
+```
+
+在 Universal Dependencies 官方测试集上的最新结果（内容词：NOUN/VERB/ADJ/ADV/PROPN/NUM）：
+
+| 语言 | 后端 | 准确率 | 样本数 | 说明 |
+|------|------|-------:|-------:|------|
+| en | lemminflect | **95.83%** | 12,324 | 利用 gold UPOS 消歧 |
+| de | simplemma | **95.46%** | 7,999 | greedy=true |
+| fr | simplemma | **94.45%** | 4,507 | greedy=false |
+| es | simplemma | **93.66%** | 5,550 | greedy=false |
+| ru | pymorphy3 | **93.25%** | 6,784 | OpenCorpora 词典 |
+| ja | sudachipy | **88.89%** | 5,554 | UD 汉字 lemma 与 Sudachi 假名辞典形经读音归一化后比较 |
+| ko | kiwipiepy | **94.02%** | 7,946 | UD 复合 lemma（`있+다`）与 Kiwi 辞典形（`있다+다`）对齐后比较 |
+
+`unaligned` 列（ja 801、ko 1,687）是 UD 与后端分词粒度不一致、无法对齐的 gold token，不计入分母。
+
 ## 部署
 
 见 [`deploy/README.md`](deploy/README.md)。要点：所有命令在 `deploy/` 下运行；`.env` 必须放在 `docker-compose.yml` 旁边；`LEMMA_MASTER_KEY` / `LEMMA_SERVICE_TOKEN` / 管理员口令哈希三个值都要用脚本生成，不要手编。
